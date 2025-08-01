@@ -40,19 +40,25 @@ class BlasiusFlow:
     def _compute_base_flow(self):
         Nx = len(self.x)
         Ny = len(self.y)
+
+        X, Y = np.meshgrid(self.x, self.y, indexing="xy")
+
         U0 = np.zeros((Ny, Nx))
         V0 = np.zeros((Ny, Nx))
-        for i, xi in enumerate(self.x):
-            for j, yj in enumerate(self.y):
-                if xi <= 0:
-                    U0[j, i] = self.U_inf * self.f1_eta[-1]
-                    V0[j, i] = 0.0
-                else:
-                    et = yj * np.sqrt(self.U_inf / (self.nu * xi))
-                    idx = min(int(et / self.eta_max * (self.Neta - 1)), self.Neta - 1)
-                    up = self.f1_eta[idx]
-                    U0[j, i] = self.U_inf * up
-                    V0[j, i] = 0.5 * np.sqrt(self.nu * self.U_inf / xi) * (et * up - self.f0_eta[idx])
+
+        mask = X > 0
+        et = np.zeros_like(X)
+        et[mask] = Y[mask] * np.sqrt(self.U_inf / (self.nu * X[mask]))
+
+        f1 = np.interp(et.ravel(), self.eta, self.f1_eta).reshape(et.shape)
+        f0 = np.interp(et.ravel(), self.eta, self.f0_eta).reshape(et.shape)
+
+        U0 = self.U_inf * f1
+        V0[mask] = 0.5 * np.sqrt(self.nu * self.U_inf / X[mask]) * (et[mask] * f1[mask] - f0[mask])
+
+        U0[~mask] = self.U_inf * self.f1_eta[-1]
+        V0[~mask] = 0.0
+
         return U0, V0
 
     def wall_shear_drag(self, mu, x):
