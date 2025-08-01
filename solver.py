@@ -29,9 +29,9 @@ class LinearBLSolver:
         """Return CFL and diffusive stability metrics.
 
         Stability score guidelines:
-        🔴 > 1   : expect instability
-        🟡 0.5-1 : marginally stable
-        🟢 < 0.5 : safe
+        > 1   : expect instability
+        0.5-1 : marginally stable
+        < 0.5 : safe
         """
         umax = np.max(np.abs(self.U0))
         vmax = np.max(np.abs(self.V0))
@@ -64,15 +64,13 @@ class LinearBLSolver:
                 print(f"[explicit] step {n}/{self.Nt}")
             delta[:, 0] = self.inlet_profile(t)
             new = delta.copy()
-            for i in range(1, self.Nx - 1):
-                for j in range(1, self.Ny - 1):
-                    dudx = (delta[j, i] - delta[j, i - 1]) / self.dx
-                    dudy = (delta[j, i] - delta[j - 1, i]) / self.dy
-                    adv = -self.U0[j, i] * dudx - self.V0[j, i] * dudy
-                    d2udx2 = (delta[j, i + 1] - 2 * delta[j, i] + delta[j, i - 1]) / self.dx ** 2
-                    d2udy2 = (delta[j + 1, i] - 2 * delta[j, i] + delta[j - 1, i]) / self.dy ** 2
-                    diff = self.nu * (d2udx2 + d2udy2)
-                    new[j, i] = delta[j, i] + self.dt * (adv + diff)
+            dudx = (delta[1:-1, 1:-1] - delta[1:-1, :-2]) / self.dx
+            dudy = (delta[1:-1, 1:-1] - delta[:-2, 1:-1]) / self.dy
+            adv = -self.U0[1:-1, 1:-1] * dudx - self.V0[1:-1, 1:-1] * dudy
+            d2udx2 = (delta[1:-1, 2:] - 2 * delta[1:-1, 1:-1] + delta[1:-1, :-2]) / self.dx ** 2
+            d2udy2 = (delta[2:, 1:-1] - 2 * delta[1:-1, 1:-1] + delta[:-2, 1:-1]) / self.dy ** 2
+            diff = self.nu * (d2udx2 + d2udy2)
+            new[1:-1, 1:-1] = delta[1:-1, 1:-1] + self.dt * (adv + diff)
             new[0, :] = 0.0
             new[-1, :] = new[-2, :]
             new[:, -1] = new[:, -2]
