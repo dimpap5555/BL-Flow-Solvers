@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+
 from matplotlib.animation import FuncAnimation
 from matplotlib.gridspec import GridSpec
 
@@ -15,15 +16,18 @@ def main():
     mu = rho * nu
     L = 1.0
 
-    Nx, Ny = 100, 100
+    Nx, Ny = 500, 100
     x = np.linspace(0, L, Nx)
     y = np.linspace(0, 0.05, Ny)
 
-    dt = 1e-4
-    Nt = 200
+    dt = 2e-3
+    Nt = 800
 
     epsilon = 0.1
     omega = 2 * np.pi * 5
+
+    def inlet(t, y):
+        return epsilon * U_inf * np.sin(omega * t)# * np.exp(-y / (0.1 * y[-1]))
 
     # ----------------------------------------------------------
 
@@ -32,9 +36,16 @@ def main():
     drag_base = base.wall_shear_drag(mu, x)
 
     # Solve linearized equations
-    solver = LinearBLSolver(base, rho, nu, dt, Nt, epsilon, omega)
-    frames_u, frames_v, t_snap = solver.run()
+    solver = LinearBLSolver(base, rho, nu, dt, Nt, inlet)
+    frames_u, frames_v, t_snap = solver.run_implicit(n_iter=5)
     drag = solver.compute_drag(frames_u, mu)
+
+    period = 2 * np.pi / omega
+    mask = t_snap >= (t_snap[-1] - period)
+    mean_drag = np.mean(drag[mask])
+    amplitude = 0.5 * (np.max(drag[mask]) - np.min(drag[mask]))
+    print(f"Mean drag last cycle: {mean_drag:.6f} (steady {drag_base:.6f})")
+    print(f"Oscillation amplitude last cycle: {amplitude:.6f}")
 
     # Plot & animate
     gs = GridSpec(2, 2, width_ratios=[1, 1], height_ratios=[1, 1])
