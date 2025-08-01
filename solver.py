@@ -1,4 +1,6 @@
 import numpy as np
+from scipy import sparse
+from scipy.sparse.linalg import spsolve
 
 class LinearBLSolver:
     """Linearized boundary layer solver using a given Blasius base flow."""
@@ -22,8 +24,68 @@ class LinearBLSolver:
         self.Ny = len(self.y)
         self.time = np.arange(Nt) * dt
 
+        self._setup_linear_system()
+
     def inlet_profile(self, t):
         return self.inlet_func(t, self.y)
+
+    def _setup_linear_system(self):
+        """Pre-compute coefficient arrays and sparse matrix."""
+        inv_dt = 1.0 / self.dt
+        aP = (
+            inv_dt
+            + 2 * self.nu / self.dx ** 2
+            + 2 * self.nu / self.dy ** 2
+            + self.U0 / self.dx
+            + self.V0 / self.dy
+        )
+        aW = -self.nu / self.dx ** 2 - self.U0 / self.dx
+        aE = np.full_like(self.U0, -self.nu / self.dx ** 2)
+        aS = -self.nu / self.dy ** 2 - self.V0 / self.dy
+        aN = np.full_like(self.U0, -self.nu / self.dy ** 2)
+
+        # store only interior coefficients
+        self.aP = aP[1:-1, 1:-1]
+        self.aW = aW[1:-1, 1:-1]
+        self.aE = aE[1:-1, 1:-1]
+        self.aS = aS[1:-1, 1:-1]
+        self.aN = aN[1:-1, 1:-1]
+
+        Nx_i = self.Nx - 2
+        Ny_i = self.Ny - 2
+
+        rows = []
+        cols = []
+        data = []
+
+        def idx(j, i):
+            return j * Nx_i + i
+
+        for j in range(Ny_i):
+            for i in range(Nx_i):
+                k = idx(j, i)
+                data.append(self.aP[j, i])
+                rows.append(k)
+                cols.append(k)
+                if i > 0:
+                    rows.append(k)
+                    cols.append(idx(j, i - 1))
+                    data.append(self.aW[j, i])
+                if i < Nx_i - 1:
+                    rows.append(k)
+                    cols.append(idx(j, i + 1))
+                    data.append(self.aE[j, i])
+                if j > 0:
+                    rows.append(k)
+                    cols.append(idx(j - 1, i))
+                    data.append(self.aS[j, i])
+                if j < Ny_i - 1:
+                    rows.append(k)
+                    cols.append(idx(j + 1, i))
+                    data.append(self.aN[j, i])
+
+        N = Nx_i * Ny_i
+        self.A = sparse.csr_matrix((data, (rows, cols)), shape=(N, N))
 
     def stability_report(self):
         """Return CFL and diffusive stability metrics.
@@ -100,6 +162,8 @@ class LinearBLSolver:
         frames_u = []
         frames_v = []
         inv_dt = 1.0 / self.dt
+        Nx_i = self.Nx - 2
+        Ny_i = self.Ny - 2
         if self.verbose:
             self.stability_report()
         for n, t in enumerate(self.time):
@@ -110,18 +174,17 @@ class LinearBLSolver:
             new = delta.copy()
             for it in range(n_iter):
                 old = new.copy()
-                for i in range(1, self.Nx - 1):
-                    for j in range(1, self.Ny - 1):
-                        aP = (inv_dt + 2 * self.nu / self.dx ** 2 +
-                               2 * self.nu / self.dy ** 2 +
-                               self.U0[j, i] / self.dx + self.V0[j, i] / self.dy)
-                        aW = -self.nu / self.dx ** 2 - self.U0[j, i] / self.dx
-                        aE = -self.nu / self.dx ** 2
-                        aS = -self.nu / self.dy ** 2 - self.V0[j, i] / self.dy
-                        aN = -self.nu / self.dy ** 2
-                        new[j, i] = (rhs[j, i] - aW * new[j, i - 1] -
-                                     aE * new[j, i + 1] - aS * new[j - 1, i] -
-                                     aN * new[j + 1, i]) / aP
+                b = rhs[1:-1, 1:-1].copy()
+
+                # apply boundary contributions
+                b[:, 0] -= self.aW[:, 0] * delta[1:-1, 0]
+                b[:, -1] -= self.aE[:, -1] * delta[1:-1, -1]
+                b[0, :] -= self.aS[0, :] * delta[0, 1:-1]
+                b[-1, :] -= self.aN[-1, :] * delta[-1, 1:-1]
+
+                sol = spsolve(self.A, b.ravel())
+                new[1:-1, 1:-1] = sol.reshape(Ny_i, Nx_i)
+
                 res = np.linalg.norm(new - old)
                 if self.verbose and it % 5 == 0:
                     print(f"  iter {it}: residual {res:.2e}")
