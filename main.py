@@ -20,8 +20,8 @@ def main():
     x = np.linspace(0, L, Nx)
     y = np.linspace(0, 0.05, Ny)
 
-    dt = 2e-3
-    Nt = 800
+    dt = 5e-3
+    Nt = 100
 
     epsilon = 0.1
     omega = 2 * np.pi * 5
@@ -36,8 +36,8 @@ def main():
     drag_base = base.wall_shear_drag(mu, x)
 
     # Solve linearized equations
-    solver = LinearBLSolver(base, rho, nu, dt, Nt, inlet)
-    frames_u, frames_v, t_snap = solver.run_implicit(n_iter=5)
+    solver = LinearBLSolver(base, rho, nu, dt, Nt, inlet, verbose=True)
+    frames_u, frames_v, t_snap = solver.run_implicit(n_iter=20, tol=1e-6)
     drag = solver.compute_drag(frames_u, mu)
 
     period = 2 * np.pi / omega
@@ -55,7 +55,9 @@ def main():
     ax3 = fig.add_subplot(gs[1, :])
     X, Y = np.meshgrid(x, y)
     levels_u = np.linspace(frames_u.min(), frames_u.max(), 50)
-    levels_v = np.linspace(frames_v.min(), frames_v.max(), 50)
+    inlet_cut = 10
+    v_slice = frames_v[:, :, inlet_cut:]
+    levels_v = np.linspace(v_slice.min(), v_slice.max(), 50)
 
     cu = ax1.contourf(X, Y, frames_u[0], levels=levels_u)
     fig.colorbar(cu, ax=ax1).set_label('u [m/s]')
