@@ -1,4 +1,5 @@
 import numpy as np
+import matplotlib.pyplot as plt
 
 class BlasiusFlow:
     """Compute the steady Blasius boundary layer solution on a given grid."""
@@ -60,3 +61,23 @@ class BlasiusFlow:
         dUdy = (self.U0[1, :] - self.U0[0, :]) / dy
         tau_w = mu * dUdy
         return np.trapezoid(tau_w, x)
+
+    def _plot_field(self, field, label, ax=None, levels=50, **kwargs):
+        if ax is None:
+            fig, ax = plt.subplots()
+        X, Y = np.meshgrid(self.x, self.y)
+        cs = ax.contourf(X, Y, field, levels=levels, **kwargs)
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+        ax.figure.colorbar(cs, ax=ax).set_label(label)
+        return ax
+
+    def plot_U0(self, ax=None, levels=50, **kwargs):
+        return self._plot_field(self.U0, "U0 [m/s]", ax=ax, levels=levels, **kwargs)
+
+    def plot_V0(self, ax=None, levels=50, **kwargs):
+        return self._plot_field(self.V0, "V0 [m/s]", ax=ax, levels=levels, **kwargs)
+
+    def plot_speed(self, ax=None, levels=50, **kwargs):
+        speed = np.sqrt(self.U0 ** 2 + self.V0 ** 2)
+        return self._plot_field(speed, "|V| [m/s]", ax=ax, levels=levels, **kwargs)
