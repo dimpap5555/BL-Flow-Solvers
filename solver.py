@@ -146,15 +146,15 @@ class LinearBLSolver:
 
             u_abs = self.U0 + delta
             v_abs = self.V0 + vprime
-            if n % 5 == 0:
-                frames_u.append(u_abs.copy())
-                frames_v.append(v_abs.copy())
+
+            frames_u.append(u_abs.copy())
+            frames_v.append(v_abs.copy())
         frames_u = np.array(frames_u)
         frames_v = np.array(frames_v)
         frames_u = np.nan_to_num(frames_u, nan=0.0, posinf=0.0, neginf=0.0)
         frames_v = np.nan_to_num(frames_v, nan=0.0, posinf=0.0, neginf=0.0)
         nframes = frames_u.shape[0]
-        t_snap = np.arange(nframes) * 5 * self.dt
+        t_snap = np.arange(nframes) * self.dt
         return frames_u, frames_v, t_snap
 
     def run_implicit(self, n_iter=20, tol=1e-6):
@@ -186,7 +186,7 @@ class LinearBLSolver:
                 new[1:-1, 1:-1] = sol.reshape(Ny_i, Nx_i)
 
                 res = np.linalg.norm(new - old)
-                if self.verbose and it % 5 == 0:
+                if self.verbose and it % 1 == 0:
                     print(f"  iter {it}: residual {res:.2e}")
                 if res < tol:
                     break
@@ -203,15 +203,15 @@ class LinearBLSolver:
 
             u_abs = self.U0 + delta
             v_abs = self.V0 + vprime
-            if n % 5 == 0:
-                frames_u.append(u_abs.copy())
-                frames_v.append(v_abs.copy())
+
+            frames_u.append(u_abs.copy())
+            frames_v.append(v_abs.copy())
         frames_u = np.array(frames_u)
         frames_v = np.array(frames_v)
         frames_u = np.nan_to_num(frames_u, nan=0.0, posinf=0.0, neginf=0.0)
         frames_v = np.nan_to_num(frames_v, nan=0.0, posinf=0.0, neginf=0.0)
         nframes = frames_u.shape[0]
-        t_snap = np.arange(nframes) * 5 * self.dt
+        t_snap = np.arange(nframes) * self.dt
         return frames_u, frames_v, t_snap
 
     def compute_drag(self, frames_u, mu):
