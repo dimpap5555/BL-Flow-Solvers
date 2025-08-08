@@ -325,13 +325,15 @@ class BlowSuctionSolver:
             u_star = u.copy()
             v_star = v.copy()
 
-            lap_u = (
-                (u[:, 2:] - 2 * u[:, 1:-1] + u[:, :-2]) / self.dx ** 2
-                + (u[2:, :] - 2 * u[1:-1, :] + u[:-2, :]) / self.dy ** 2
+            lap_u = np.zeros_like(u)
+            lap_u[1:-1, 1:-1] = (
+                    (u[1:-1, 2:] - 2 * u[1:-1, 1:-1] + u[1:-1, :-2]) / self.dx ** 2
+                    + (u[2:, 1:-1] - 2 * u[1:-1, 1:-1] + u[:-2, 1:-1]) / self.dy ** 2
             )
-            lap_v = (
-                (v[:, 2:] - 2 * v[:, 1:-1] + v[:, :-2]) / self.dx ** 2
-                + (v[2:, :] - 2 * v[1:-1, :] + v[:-2, :]) / self.dy ** 2
+            lap_v = np.zeros_like(v)
+            lap_v[1:-1, 1:-1] = (
+                    (v[1:-1, 2:] - 2 * v[1:-1, 1:-1] + v[1:-1, :-2]) / self.dx ** 2
+                    + (v[2:, 1:-1] - 2 * v[1:-1, 1:-1] + v[:-2, 1:-1]) / self.dy ** 2
             )
             u_star[1:-1, 1:-1] += self.dt * self.nu * lap_u[1:-1, 1:-1]
             v_star[1:-1, 1:-1] += self.dt * self.nu * lap_v[1:-1, 1:-1]
