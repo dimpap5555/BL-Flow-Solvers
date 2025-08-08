@@ -5,7 +5,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.gridspec import GridSpec
 
 from blasius import BlasiusFlow
-from solver import LinearBLSolver
+from solver import LinearBLSolver, BlowSuctionSolver
 
 
 def main():
@@ -84,6 +84,23 @@ def main():
     plt.tight_layout()
     plt.show()
 
+def blow_suction_example():
+    """Run a simple demonstration of the BlowSuctionSolver."""
+    rho = 1.0
+    nu = 1e-3
+    x = np.linspace(0.0, 0.1, 50)
+    y = np.linspace(0.0, 0.05, 50)
+    dt = 1e-3
+    Nt = 50
+
+    def wall(t, x):
+        return 0.01 * np.sin(2 * np.pi * t) * np.ones_like(x)
+
+    solver = BlowSuctionSolver(rho, nu, x, y, dt, Nt, wall, verbose=True)
+    frames_u, frames_v, time = solver.run()
+    print(f"Max wall-normal velocity at final time: {frames_v[-1].max():.3e}")
+
 
 if __name__ == '__main__':
-    main()
+    blow_suction_example()
+    # main()

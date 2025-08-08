@@ -220,3 +220,164 @@ class LinearBLSolver:
             dud_y = (frames_u[k, 1, :] - frames_u[k, 0, :]) / self.dy
             drag[k] = mu * np.trapezoid(dud_y, self.x)
         return np.nan_to_num(drag)
+
+
+class BlowSuctionSolver:
+    """Solver for unsteady blowing/suction from a stationary wall.
+
+    This class advances the linearized Navier--Stokes equations in a
+    quiescent base flow.  The only forcing comes from a prescribed normal
+    velocity at the wall (``y=0``).  A projection method is used to enforce
+    incompressibility.
+
+    Parameters
+    ----------
+    rho : float
+        Fluid density.
+    nu : float
+        Kinematic viscosity.
+    x, y : array_like
+        1-D arrays defining the computational grid.
+    dt : float
+        Time step size.
+    Nt : int
+        Number of time steps to march.
+    wall_func : callable
+        Function of ``(t, x)`` giving the normal velocity at the wall.
+    verbose : bool, optional
+        If True, print progress information.
+    """
+
+    def __init__(self, rho, nu, x, y, dt, Nt, wall_func, verbose=False):
+        self.rho = rho
+        self.nu = nu
+        self.x = np.asarray(x)
+        self.y = np.asarray(y)
+        self.dt = dt
+        self.Nt = Nt
+        self.wall_func = wall_func
+        self.verbose = verbose
+
+        self.dx = self.x[1] - self.x[0]
+        self.dy = self.y[1] - self.y[0]
+        self.Nx = len(self.x)
+        self.Ny = len(self.y)
+        self.time = np.arange(Nt) * dt
+
+        self._build_poisson_matrix()
+
+    def wall_profile(self, t):
+        return self.wall_func(t, self.x)
+
+    def _build_poisson_matrix(self):
+        """Build Laplacian matrix for the pressure Poisson equation."""
+        Nx_i = self.Nx - 2
+        Ny_i = self.Ny - 2
+        dx2 = self.dx ** 2
+        dy2 = self.dy ** 2
+        aP = 2 / dx2 + 2 / dy2
+        aW = aE = -1 / dx2
+        aS = aN = -1 / dy2
+
+        rows, cols, data = [], [], []
+
+        def idx(j, i):
+            return j * Nx_i + i
+
+        for j in range(Ny_i):
+            for i in range(Nx_i):
+                k = idx(j, i)
+                rows.append(k)
+                cols.append(k)
+                data.append(aP)
+                if i > 0:
+                    rows.append(k)
+                    cols.append(idx(j, i - 1))
+                    data.append(aW)
+                if i < Nx_i - 1:
+                    rows.append(k)
+                    cols.append(idx(j, i + 1))
+                    data.append(aE)
+                if j > 0:
+                    rows.append(k)
+                    cols.append(idx(j - 1, i))
+                    data.append(aS)
+                if j < Ny_i - 1:
+                    rows.append(k)
+                    cols.append(idx(j + 1, i))
+                    data.append(aN)
+
+        N = Nx_i * Ny_i
+        self.P = sparse.csr_matrix((data, (rows, cols)), shape=(N, N))
+
+    def run(self):
+        """March the solution using an explicit projection method."""
+        u = np.zeros((self.Ny, self.Nx))
+        v = np.zeros_like(u)
+        p = np.zeros_like(u)
+        frames_u = []
+        frames_v = []
+        for n, t in enumerate(self.time):
+            if self.verbose and n % 10 == 0:
+                print(f"[blow] step {n}/{self.Nt}")
+
+            v[0, :] = self.wall_profile(t)
+            u_star = u.copy()
+            v_star = v.copy()
+
+            lap_u = (
+                (u[:, 2:] - 2 * u[:, 1:-1] + u[:, :-2]) / self.dx ** 2
+                + (u[2:, :] - 2 * u[1:-1, :] + u[:-2, :]) / self.dy ** 2
+            )
+            lap_v = (
+                (v[:, 2:] - 2 * v[:, 1:-1] + v[:, :-2]) / self.dx ** 2
+                + (v[2:, :] - 2 * v[1:-1, :] + v[:-2, :]) / self.dy ** 2
+            )
+            u_star[1:-1, 1:-1] += self.dt * self.nu * lap_u[1:-1, 1:-1]
+            v_star[1:-1, 1:-1] += self.dt * self.nu * lap_v[1:-1, 1:-1]
+
+            u_star[0, :] = 0.0
+            u_star[-1, :] = 0.0
+            u_star[:, 0] = 0.0
+            u_star[:, -1] = 0.0
+            v_star[0, :] = self.wall_profile(t)
+            v_star[-1, :] = 0.0
+            v_star[:, 0] = 0.0
+            v_star[:, -1] = 0.0
+
+            div = (
+                (u_star[1:-1, 2:] - u_star[1:-1, :-2]) / (2 * self.dx)
+                + (v_star[2:, 1:-1] - v_star[:-2, 1:-1]) / (2 * self.dy)
+            )
+            rhs = (self.rho / self.dt) * div
+            p_int = spsolve(self.P, rhs.ravel())
+            p[1:-1, 1:-1] = p_int.reshape(self.Ny - 2, self.Nx - 2)
+            p[0, :] = 0.0
+            p[-1, :] = 0.0
+            p[:, 0] = 0.0
+            p[:, -1] = 0.0
+
+            dpdx = (p[1:-1, 2:] - p[1:-1, :-2]) / (2 * self.dx)
+            dpdy = (p[2:, 1:-1] - p[:-2, 1:-1]) / (2 * self.dy)
+            u_new = u_star.copy()
+            v_new = v_star.copy()
+            u_new[1:-1, 1:-1] -= self.dt / self.rho * dpdx
+            v_new[1:-1, 1:-1] -= self.dt / self.rho * dpdy
+
+            u_new[0, :] = 0.0
+            u_new[-1, :] = 0.0
+            u_new[:, 0] = 0.0
+            u_new[:, -1] = 0.0
+            v_new[0, :] = self.wall_profile(t)
+            v_new[-1, :] = 0.0
+            v_new[:, 0] = 0.0
+            v_new[:, -1] = 0.0
+
+            u = u_new
+            v = v_new
+            frames_u.append(u.copy())
+            frames_v.append(v.copy())
+
+        frames_u = np.array(frames_u)
+        frames_v = np.array(frames_v)
+        return frames_u, frames_v, self.time
