@@ -88,17 +88,58 @@ def blow_suction_example():
     """Run a simple demonstration of the BlowSuctionSolver."""
     rho = 1.0
     nu = 1e-3
-    x = np.linspace(0.0, 0.1, 50)
-    y = np.linspace(0.0, 0.05, 50)
-    dt = 1e-6
+    x = np.linspace(0.0, 1.0, 100)
+    y = np.linspace(0.0, 0.05, 5)
+    dt = 1e-3
     Nt = 50
 
     def wall(t, x):
-        return 0.01 * np.sin(2 * np.pi * t) * np.ones_like(x)
+        return 0.001 * np.sin(2 * np.pi * t) * np.ones_like(x)
 
     solver = BlowSuctionSolver(rho, nu, x, y, dt, Nt, wall, verbose=True)
+    solver.stability_report()
     frames_u, frames_v, time = solver.run()
+
+    # Post-processing: visualize the evolving velocity field
+    _visualize_blow_suction(frames_u, frames_v, x, y, time)
+
     print(f"Max wall-normal velocity at final time: {frames_v[-1].max():.3e}")
+
+
+def _visualize_blow_suction(frames_u, frames_v, x, y, time):
+    """Create contour plots and an animation for the blow/suction solver."""
+    X, Y = np.meshgrid(x, y)
+    levels_u = np.linspace(frames_u.min(), frames_u.max(), 50)
+    levels_v = np.linspace(frames_v.min(), frames_v.max(), 50)
+
+    gs = GridSpec(2, 2, width_ratios=[1, 1], height_ratios=[1, 1])
+    fig = plt.figure(figsize=(10, 8))
+    ax1 = fig.add_subplot(gs[0, 0])
+    ax2 = fig.add_subplot(gs[0, 1])
+    ax3 = fig.add_subplot(gs[1, :])
+
+    cu = ax1.contourf(X, Y, frames_u[0], levels=levels_u)
+    fig.colorbar(cu, ax=ax1).set_label('u [m/s]')
+    cv = ax2.contourf(X, Y, frames_v[0], levels=levels_v)
+    fig.colorbar(cv, ax=ax2).set_label('v [m/s]')
+
+    max_v = np.max(np.abs(frames_v), axis=(1, 2))
+    ax3.set_xlabel('Time [s]')
+    ax3.set_ylabel('Max |v| [m/s]')
+    ax3.plot(time, max_v, 'k-')
+
+    def animate(k):
+        ax1.clear(); ax2.clear(); ax3.clear()
+        ax1.contourf(X, Y, frames_u[k], levels=levels_u)
+        ax2.contourf(X, Y, frames_v[k], levels=levels_v)
+        ax3.plot(time[:k+1], max_v[:k+1], 'k-')
+        ax1.set_xlabel('x [m]'); ax1.set_ylabel('y [m]'); ax1.set_title(f'u at t={time[k]:.3e}s')
+        ax2.set_xlabel('x [m]'); ax2.set_ylabel('y [m]'); ax2.set_title(f'v at t={time[k]:.3e}s')
+        ax3.set_xlabel('Time [s]'); ax3.set_ylabel('Max |v| [m/s]')
+
+    FuncAnimation(fig, animate, frames=len(time), interval=100)
+    plt.tight_layout()
+    plt.show()
 
 
 if __name__ == '__main__':

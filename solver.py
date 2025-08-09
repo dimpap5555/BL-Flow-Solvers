@@ -265,6 +265,7 @@ class BlowSuctionSolver:
         self.time = np.arange(Nt) * dt
 
         self._build_poisson_matrix()
+        self._build_helmholtz_matrix()
 
     def wall_profile(self, t):
         return self.wall_func(t, self.x)
@@ -310,13 +311,65 @@ class BlowSuctionSolver:
         N = Nx_i * Ny_i
         self.P = sparse.csr_matrix((data, (rows, cols)), shape=(N, N))
 
-    def run(self):
+    def _build_helmholtz_matrix(self):
+        """Build matrix for implicit diffusion step (I - dt nu ∇²)."""
+        Nx_i = self.Nx - 2
+        Ny_i = self.Ny - 2
+        dx2 = self.dx ** 2
+        dy2 = self.dy ** 2
+        rx = self.nu * self.dt / dx2
+        ry = self.nu * self.dt / dy2
+        aP = 1 + 2 * rx + 2 * ry
+        aW = aE = -rx
+        aS = aN = -ry
+
+        rows, cols, data = [], [], []
+
+        def idx(j, i):
+            return j * Nx_i + i
+
+        for j in range(Ny_i):
+            for i in range(Nx_i):
+                k = idx(j, i)
+                rows.append(k); cols.append(k); data.append(aP)
+                if i > 0:
+                    rows.append(k); cols.append(idx(j, i - 1)); data.append(aW)
+                if i < Nx_i - 1:
+                    rows.append(k); cols.append(idx(j, i + 1)); data.append(aE)
+                if j > 0:
+                    rows.append(k); cols.append(idx(j - 1, i)); data.append(aS)
+                if j < Ny_i - 1:
+                    rows.append(k); cols.append(idx(j + 1, i)); data.append(aN)
+
+        N = Nx_i * Ny_i
+        self.H = sparse.csr_matrix((data, (rows, cols)), shape=(N, N))
+
+    def stability_report(self):
+        """Return diffusive stability metric for the explicit scheme."""
+        Diff_x = 2 * self.nu * self.dt / self.dx ** 2
+        Diff_y = 2 * self.nu * self.dt / self.dy ** 2
+        score = Diff_x + Diff_y
+        if score > 1:
+            tag = "UNSTABLE"
+        elif score >= 0.5:
+            tag = "marginal"
+        else:
+            tag = "stable"
+        if self.verbose:
+            print(
+                f"Diff_x={Diff_x:.3f}, Diff_y={Diff_y:.3f}, Score={score:.3f} ({tag})"
+            )
+        return Diff_x, Diff_y, score
+
+    def run_explicit(self):
         """March the solution using an explicit projection method."""
         u = np.zeros((self.Ny, self.Nx))
         v = np.zeros_like(u)
         p = np.zeros_like(u)
         frames_u = []
         frames_v = []
+        if self.verbose:
+            self.stability_report()
         for n, t in enumerate(self.time):
             if self.verbose and n % 10 == 0:
                 print(f"[blow] step {n}/{self.Nt}")
@@ -383,3 +436,11 @@ class BlowSuctionSolver:
         frames_u = np.array(frames_u)
         frames_v = np.array(frames_v)
         return frames_u, frames_v, self.time
+
+    def run(self):
+        """Backward-compatible wrapper for the explicit solver."""
+        return self.run_explicit()
+
+    def run_implicit(self, *args, **kwargs):
+        """Placeholder for a future implicit projection scheme."""
+        raise NotImplementedError("Implicit method not implemented yet")
