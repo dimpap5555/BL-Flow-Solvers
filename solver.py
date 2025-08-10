@@ -271,14 +271,16 @@ class BlowSuctionSolver:
         return self.wall_func(t, self.x)
 
     def _build_poisson_matrix(self):
-        """Build Laplacian matrix for the pressure Poisson equation."""
+        """Build Laplacian matrix for the pressure Poisson equation.
+
+        A homogeneous Neumann boundary condition is applied on all walls and
+        the pressure at the first interior cell is pinned to zero to remove the
+        nullspace of the operator.
+        """
         Nx_i = self.Nx - 2
         Ny_i = self.Ny - 2
         dx2 = self.dx ** 2
         dy2 = self.dy ** 2
-        aP = 2 / dx2 + 2 / dy2
-        aW = aE = -1 / dx2
-        aS = aN = -1 / dy2
 
         rows, cols, data = [], [], []
 
@@ -288,28 +290,38 @@ class BlowSuctionSolver:
         for j in range(Ny_i):
             for i in range(Nx_i):
                 k = idx(j, i)
-                rows.append(k)
-                cols.append(k)
-                data.append(aP)
+                aP = 0.0
+                # west/east
                 if i > 0:
-                    rows.append(k)
-                    cols.append(idx(j, i - 1))
-                    data.append(aW)
+                    rows.append(k); cols.append(idx(j, i - 1)); data.append(-1 / dx2)
+                    aP += 1 / dx2
+                else:
+                    aP += 1 / dx2  # Neumann
                 if i < Nx_i - 1:
-                    rows.append(k)
-                    cols.append(idx(j, i + 1))
-                    data.append(aE)
+                    rows.append(k); cols.append(idx(j, i + 1)); data.append(-1 / dx2)
+                    aP += 1 / dx2
+                else:
+                    aP += 1 / dx2
+                # south/north
                 if j > 0:
-                    rows.append(k)
-                    cols.append(idx(j - 1, i))
-                    data.append(aS)
+                    rows.append(k); cols.append(idx(j - 1, i)); data.append(-1 / dy2)
+                    aP += 1 / dy2
+                else:
+                    aP += 1 / dy2
                 if j < Ny_i - 1:
-                    rows.append(k)
-                    cols.append(idx(j + 1, i))
-                    data.append(aN)
+                    rows.append(k); cols.append(idx(j + 1, i)); data.append(-1 / dy2)
+                    aP += 1 / dy2
+                else:
+                    aP += 1 / dy2
+
+                rows.append(k); cols.append(k); data.append(aP)
 
         N = Nx_i * Ny_i
-        self.P = sparse.csr_matrix((data, (rows, cols)), shape=(N, N))
+        P = sparse.csr_matrix((data, (rows, cols)), shape=(N, N)).tolil()
+        # pin one pressure point to remove singularity
+        P[0, :] = 0.0
+        P[0, 0] = 1.0
+        self.P = P.tocsr()
 
     def _build_helmholtz_matrix(self):
         """Build matrix for implicit diffusion step (I - dt nu ∇²)."""
@@ -438,9 +450,91 @@ class BlowSuctionSolver:
         return frames_u, frames_v, self.time
 
     def run(self):
-        """Backward-compatible wrapper for the explicit solver."""
-        return self.run_explicit()
+        """Run the solver using an implicit diffusion step."""
+        return self.run_implicit()
 
-    def run_implicit(self, *args, **kwargs):
-        """Placeholder for a future implicit projection scheme."""
-        raise NotImplementedError("Implicit method not implemented yet")
+    def _implicit_step(self, field, bc):
+        """Solve (I - dt nu ∇²) field = rhs with boundary conditions ``bc``.
+
+        Parameters
+        ----------
+        field : ndarray
+            Array containing the previous time level values.
+        bc : ndarray
+            Array with the boundary values for the new time level.
+        """
+        rx = self.nu * self.dt / self.dx ** 2
+        ry = self.nu * self.dt / self.dy ** 2
+        rhs = field.copy()
+        rhs[0, :] = bc[0, :]
+        rhs[-1, :] = bc[-1, :]
+        rhs[:, 0] = bc[:, 0]
+        rhs[:, -1] = bc[:, -1]
+        b = rhs[1:-1, 1:-1].copy()
+        b[:, 0] += rx * bc[1:-1, 0]
+        b[:, -1] += rx * bc[1:-1, -1]
+        b[0, :] += ry * bc[0, 1:-1]
+        b[-1, :] += ry * bc[-1, 1:-1]
+        sol = spsolve(self.H, b.ravel())
+        out = bc.copy()
+        out[1:-1, 1:-1] = sol.reshape(self.Ny - 2, self.Nx - 2)
+        return out
+
+    def run_implicit(self):
+        """March the solution using an implicit diffusion projection method."""
+        u = np.zeros((self.Ny, self.Nx))
+        v = np.zeros_like(u)
+        p = np.zeros_like(u)
+        frames_u = []
+        frames_v = []
+        if self.verbose:
+            self.stability_report()
+        for n, t in enumerate(self.time):
+            if self.verbose and n % 10 == 0:
+                print(f"[blow] step {n}/{self.Nt}")
+
+            bc_u = np.zeros_like(u)
+            bc_v = np.zeros_like(v)
+            bc_v[0, :] = self.wall_profile(t)
+
+            u_star = self._implicit_step(u, bc_u)
+            v_star = self._implicit_step(v, bc_v)
+
+            div = (
+                    (u_star[1:-1, 2:] - u_star[1:-1, :-2]) / (2 * self.dx)
+                    + (v_star[2:, 1:-1] - v_star[:-2, 1:-1]) / (2 * self.dy)
+            )
+            rhs = (self.rho / self.dt) * div
+            rhs = rhs.ravel()
+            rhs[0] = 0.0
+            p_int = spsolve(self.P, rhs)
+            p[1:-1, 1:-1] = p_int.reshape(self.Ny - 2, self.Nx - 2)
+            p[0, 1:-1] = p[1, 1:-1]
+            p[-1, 1:-1] = p[-2, 1:-1]
+            p[:, 0] = p[:, 1]
+            p[:, -1] = p[:, -2]
+
+            dpdx = (p[1:-1, 2:] - p[1:-1, :-2]) / (2 * self.dx)
+            dpdy = (p[2:, 1:-1] - p[:-2, 1:-1]) / (2 * self.dy)
+            u_new = u_star.copy()
+            v_new = v_star.copy()
+            u_new[1:-1, 1:-1] -= self.dt / self.rho * dpdx
+            v_new[1:-1, 1:-1] -= self.dt / self.rho * dpdy
+
+            u_new[0, :] = 0.0
+            u_new[-1, :] = 0.0
+            u_new[:, 0] = 0.0
+            u_new[:, -1] = 0.0
+            v_new[0, :] = self.wall_profile(t)
+            v_new[-1, :] = 0.0
+            v_new[:, 0] = 0.0
+            v_new[:, -1] = 0.0
+
+            u = u_new
+            v = v_new
+            frames_u.append(u.copy())
+            frames_v.append(v.copy())
+
+        frames_u = np.array(frames_u)
+        frames_v = np.array(frames_v)
+        return frames_u, frames_v, self.time
