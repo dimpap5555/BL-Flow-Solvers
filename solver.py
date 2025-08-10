@@ -295,23 +295,15 @@ class BlowSuctionSolver:
                 if i > 0:
                     rows.append(k); cols.append(idx(j, i - 1)); data.append(-1 / dx2)
                     aP += 1 / dx2
-                else:
-                    aP += 1 / dx2  # Neumann
                 if i < Nx_i - 1:
                     rows.append(k); cols.append(idx(j, i + 1)); data.append(-1 / dx2)
-                    aP += 1 / dx2
-                else:
                     aP += 1 / dx2
                 # south/north
                 if j > 0:
                     rows.append(k); cols.append(idx(j - 1, i)); data.append(-1 / dy2)
                     aP += 1 / dy2
-                else:
-                    aP += 1 / dy2
                 if j < Ny_i - 1:
                     rows.append(k); cols.append(idx(j + 1, i)); data.append(-1 / dy2)
-                    aP += 1 / dy2
-                else:
                     aP += 1 / dy2
 
                 rows.append(k); cols.append(k); data.append(aP)
@@ -506,6 +498,7 @@ class BlowSuctionSolver:
             )
             rhs = (self.rho / self.dt) * div
             rhs = rhs.ravel()
+            rhs -= rhs.mean()
             rhs[0] = 0.0
             p_int = spsolve(self.P, rhs)
             p[1:-1, 1:-1] = p_int.reshape(self.Ny - 2, self.Nx - 2)
@@ -532,6 +525,16 @@ class BlowSuctionSolver:
 
             u = u_new
             v = v_new
+
+            if self.verbose:
+                divU = (
+                    (u[1:-1, 2:] - u[1:-1, :-2]) / (2 * self.dx)
+                    + (v[2:, 1:-1] - v[:-2, 1:-1]) / (2 * self.dy)
+                )
+                div_norm = np.linalg.norm(divU.ravel(), ord=2)
+                ke = np.sum(u ** 2 + v ** 2)
+                print(f"    div L2={div_norm:.3e}, KE={ke:.3e}")
+
             frames_u.append(u.copy())
             frames_v.append(v.copy())
 
