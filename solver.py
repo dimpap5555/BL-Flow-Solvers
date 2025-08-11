@@ -387,14 +387,15 @@ class BlowSuctionSolver:
             u_star[1:-1, 1:-1] += self.dt * (self.nu * lap_u[1:-1, 1:-1] - (1 / self.rho) * dpdx[1:-1, 1:-1])
             v_star[1:-1, 1:-1] += self.dt * (self.nu * lap_v[1:-1, 1:-1] - (1 / self.rho) * dpdy[1:-1, 1:-1])
 
+            # Apply boundary conditions (no-change except blow/suction wall)
             u_star[0, :] = 0.0
-            u_star[-1, :] = 0.0
-            u_star[:, 0] = 0.0
-            u_star[:, -1] = 0.0
+            u_star[-1, :] = u_star[-2, :]
+            u_star[:, 0] = u_star[:, 1]
+            u_star[:, -1] = u_star[:, -2]
             v_star[0, :] = self.wall_profile(t)
-            v_star[-1, :] = 0.0
-            v_star[:, 0] = 0.0
-            v_star[:, -1] = 0.0
+            v_star[-1, :] = v_star[-2, :]
+            v_star[:, 0] = v_star[:, 1]
+            v_star[:, -1] = v_star[:, -2]
 
             # Step 2: divergence of tentative velocity
             div = (
@@ -412,13 +413,13 @@ class BlowSuctionSolver:
             v[1:-1, 1:-1] = v_star[1:-1, 1:-1] - (self.dt / self.rho) * dpdy_new
 
             u[0, :] = 0.0
-            u[-1, :] = 0.0
-            u[:, 0] = 0.0
-            u[:, -1] = 0.0
+            u[-1, :] = u[-2, :]
+            u[:, 0] = u[:, 1]
+            u[:, -1] = u[:, -2]
             v[0, :] = self.wall_profile(t)
-            v[-1, :] = 0.0
-            v[:, 0] = 0.0
-            v[:, -1] = 0.0
+            v[-1, :] = v[-2, :]
+            v[:, 0] = v[:, 1]
+            v[:, -1] = v[:, -2]
 
             frames_u.append(u.copy())
             frames_v.append(v.copy())
@@ -474,14 +475,15 @@ class BlowSuctionSolver:
             u_star[1:-1, 1:-1] = sol_u.reshape(Ny_i, Nx_i)
             v_star[1:-1, 1:-1] = sol_v.reshape(Ny_i, Nx_i)
 
+            # Apply boundary conditions (no-change except blow/suction wall)
             u_star[0, :] = 0.0
-            u_star[-1, :] = 0.0
-            u_star[:, 0] = 0.0
-            u_star[:, -1] = 0.0
+            u_star[-1, :] = u_star[-2, :]
+            u_star[:, 0] = u_star[:, 1]
+            u_star[:, -1] = u_star[:, -2]
             v_star[0, :] = self.wall_profile(t)
-            v_star[-1, :] = 0.0
-            v_star[:, 0] = 0.0
-            v_star[:, -1] = 0.0
+            v_star[-1, :] = v_star[-2, :]
+            v_star[:, 0] = v_star[:, 1]
+            v_star[:, -1] = v_star[:, -2]
 
             div = (
                     (u_star[1:-1, 2:] - u_star[1:-1, :-2]) / (2 * self.dx)
@@ -503,13 +505,13 @@ class BlowSuctionSolver:
             )
 
             u_new[0, :] = 0.0
-            u_new[-1, :] = 0.0
-            u_new[:, 0] = 0.0
-            u_new[:, -1] = 0.0
+            u_new[-1, :] = u_new[-2, :]
+            u_new[:, 0] = u_new[:, 1]
+            u_new[:, -1] = u_new[:, -2]
             v_new[0, :] = self.wall_profile(t)
-            v_new[-1, :] = 0.0
-            v_new[:, 0] = 0.0
-            v_new[:, -1] = 0.0
+            v_new[-1, :] = v_new[-2, :]
+            v_new[:, 0] = v_new[:, 1]
+            v_new[:, -1] = v_new[:, -2]
 
             p[1:-1, 1:-1] += phi[1:-1, 1:-1]
 
