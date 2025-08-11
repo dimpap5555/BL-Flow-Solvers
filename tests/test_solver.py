@@ -55,5 +55,5 @@ def test_blowsolver_stability_report():
     dt = 1e-3
     Nt = 1
     solver = BlowSuctionSolver(rho, nu, x, y, dt, Nt, lambda t, x: np.zeros_like(x))
-    diff_x, diff_y, score = solver.stability_report()
+    diff, press, score = solver.stability_report()
     assert score < 1.0

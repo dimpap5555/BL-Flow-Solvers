@@ -223,12 +223,11 @@ class LinearBLSolver:
 
 
 class BlowSuctionSolver:
-    """Solver for unsteady blowing/suction from a stationary wall.
+    """Fully explicit solver for blowing/suction from a stationary wall.
 
-    This class advances the linearized Navier--Stokes equations in a
-    quiescent base flow.  The only forcing comes from a prescribed normal
-    velocity at the wall (``y=0``).  A projection method is used to enforce
-    incompressibility.
+    The algorithm follows a four-step explicit projection with an
+    artificial-compressibility style pressure correction. No Poisson solve
+    is required.
 
     Parameters
     ----------
@@ -237,18 +236,21 @@ class BlowSuctionSolver:
     nu : float
         Kinematic viscosity.
     x, y : array_like
-        1-D arrays defining the computational grid.
+        Grid coordinates.
     dt : float
         Time step size.
     Nt : int
-        Number of time steps to march.
+        Number of time steps to integrate.
     wall_func : callable
-        Function of ``(t, x)`` giving the normal velocity at the wall.
+        Function ``wall_func(t, x)`` prescribing the wall-normal velocity at
+        ``y=0``.
+    cp : float, optional
+        Explicit pressure correction coefficient (0.5-1.0).
     verbose : bool, optional
-        If True, print progress information.
+        Print stability information when True.
     """
 
-    def __init__(self, rho, nu, x, y, dt, Nt, wall_func, verbose=False):
+    def __init__(self, rho, nu, x, y, dt, Nt, wall_func, cp=0.7, verbose=False):
         self.rho = rho
         self.nu = nu
         self.x = np.asarray(x)
@@ -256,6 +258,7 @@ class BlowSuctionSolver:
         self.dt = dt
         self.Nt = Nt
         self.wall_func = wall_func
+        self.cp = cp
         self.verbose = verbose
 
         self.dx = self.x[1] - self.x[0]
@@ -264,95 +267,18 @@ class BlowSuctionSolver:
         self.Ny = len(self.y)
         self.time = np.arange(Nt) * dt
 
-        self._build_poisson_matrix()
-        self._build_helmholtz_matrix()
-
     def wall_profile(self, t):
         return self.wall_func(t, self.x)
 
-    def _build_poisson_matrix(self):
-        """Build Laplacian matrix for the pressure Poisson equation.
-
-        A homogeneous Neumann boundary condition is applied on all walls and
-        the pressure at the first interior cell is pinned to zero to remove the
-        nullspace of the operator.
-        """
-        Nx_i = self.Nx - 2
-        Ny_i = self.Ny - 2
-        dx2 = self.dx ** 2
-        dy2 = self.dy ** 2
-
-        rows, cols, data = [], [], []
-
-        def idx(j, i):
-            return j * Nx_i + i
-
-        for j in range(Ny_i):
-            for i in range(Nx_i):
-                k = idx(j, i)
-                aP = 0.0
-                # west/east
-                if i > 0:
-                    rows.append(k); cols.append(idx(j, i - 1)); data.append(-1 / dx2)
-                    aP += 1 / dx2
-                if i < Nx_i - 1:
-                    rows.append(k); cols.append(idx(j, i + 1)); data.append(-1 / dx2)
-                    aP += 1 / dx2
-                # south/north
-                if j > 0:
-                    rows.append(k); cols.append(idx(j - 1, i)); data.append(-1 / dy2)
-                    aP += 1 / dy2
-                if j < Ny_i - 1:
-                    rows.append(k); cols.append(idx(j + 1, i)); data.append(-1 / dy2)
-                    aP += 1 / dy2
-
-                rows.append(k); cols.append(k); data.append(aP)
-
-        N = Nx_i * Ny_i
-        P = sparse.csr_matrix((data, (rows, cols)), shape=(N, N)).tolil()
-        # pin one pressure point to remove singularity
-        P[0, :] = 0.0
-        P[0, 0] = 1.0
-        self.P = P.tocsr()
-
-    def _build_helmholtz_matrix(self):
-        """Build matrix for implicit diffusion step (I - dt nu ∇²)."""
-        Nx_i = self.Nx - 2
-        Ny_i = self.Ny - 2
-        dx2 = self.dx ** 2
-        dy2 = self.dy ** 2
-        rx = self.nu * self.dt / dx2
-        ry = self.nu * self.dt / dy2
-        aP = 1 + 2 * rx + 2 * ry
-        aW = aE = -rx
-        aS = aN = -ry
-
-        rows, cols, data = [], [], []
-
-        def idx(j, i):
-            return j * Nx_i + i
-
-        for j in range(Ny_i):
-            for i in range(Nx_i):
-                k = idx(j, i)
-                rows.append(k); cols.append(k); data.append(aP)
-                if i > 0:
-                    rows.append(k); cols.append(idx(j, i - 1)); data.append(aW)
-                if i < Nx_i - 1:
-                    rows.append(k); cols.append(idx(j, i + 1)); data.append(aE)
-                if j > 0:
-                    rows.append(k); cols.append(idx(j - 1, i)); data.append(aS)
-                if j < Ny_i - 1:
-                    rows.append(k); cols.append(idx(j + 1, i)); data.append(aN)
-
-        N = Nx_i * Ny_i
-        self.H = sparse.csr_matrix((data, (rows, cols)), shape=(N, N))
-
     def stability_report(self):
-        """Return diffusive stability metric for the explicit scheme."""
-        Diff_x = 2 * self.nu * self.dt / self.dx ** 2
-        Diff_y = 2 * self.nu * self.dt / self.dy ** 2
-        score = Diff_x + Diff_y
+        """Return diffusion and pressure stability metrics."""
+        diff_limit = (self.dx ** 2 * self.dy ** 2) / (2 * self.nu * (self.dx ** 2 + self.dy ** 2))
+        diff_score = self.dt / diff_limit
+
+        press_limit = min(self.dx, self.dy) / self.cp
+        press_score = self.dt / press_limit
+
+        score = max(diff_score, press_score)
         if score > 1:
             tag = "UNSTABLE"
         elif score >= 0.5:
@@ -360,13 +286,11 @@ class BlowSuctionSolver:
         else:
             tag = "stable"
         if self.verbose:
-            print(
-                f"Diff_x={Diff_x:.3f}, Diff_y={Diff_y:.3f}, Score={score:.3f} ({tag})"
-            )
-        return Diff_x, Diff_y, score
+            print(f"Diff={diff_score:.3f}, Press={press_score:.3f}, Score={score:.3f} ({tag})")
+        return diff_score, press_score, score
 
     def run_explicit(self):
-        """March the solution using an explicit projection method."""
+        """Advance the solution using the explicit projection scheme."""
         u = np.zeros((self.Ny, self.Nx))
         v = np.zeros_like(u)
         p = np.zeros_like(u)
@@ -378,22 +302,29 @@ class BlowSuctionSolver:
             if self.verbose and n % 10 == 0:
                 print(f"[blow] step {n}/{self.Nt}")
 
+            # Step 1: predictor
             v[0, :] = self.wall_profile(t)
             u_star = u.copy()
             v_star = v.copy()
 
             lap_u = np.zeros_like(u)
             lap_u[1:-1, 1:-1] = (
-                    (u[1:-1, 2:] - 2 * u[1:-1, 1:-1] + u[1:-1, :-2]) / self.dx ** 2
-                    + (u[2:, 1:-1] - 2 * u[1:-1, 1:-1] + u[:-2, 1:-1]) / self.dy ** 2
+                (u[1:-1, 2:] - 2 * u[1:-1, 1:-1] + u[1:-1, :-2]) / self.dx ** 2
+                + (u[2:, 1:-1] - 2 * u[1:-1, 1:-1] + u[:-2, 1:-1]) / self.dy ** 2
             )
             lap_v = np.zeros_like(v)
             lap_v[1:-1, 1:-1] = (
-                    (v[1:-1, 2:] - 2 * v[1:-1, 1:-1] + v[1:-1, :-2]) / self.dx ** 2
-                    + (v[2:, 1:-1] - 2 * v[1:-1, 1:-1] + v[:-2, 1:-1]) / self.dy ** 2
+                (v[1:-1, 2:] - 2 * v[1:-1, 1:-1] + v[1:-1, :-2]) / self.dx ** 2
+                + (v[2:, 1:-1] - 2 * v[1:-1, 1:-1] + v[:-2, 1:-1]) / self.dy ** 2
             )
-            u_star[1:-1, 1:-1] += self.dt * self.nu * lap_u[1:-1, 1:-1]
-            v_star[1:-1, 1:-1] += self.dt * self.nu * lap_v[1:-1, 1:-1]
+
+            dpdx = np.zeros_like(u)
+            dpdx[:, 1:-1] = (p[:, 2:] - p[:, :-2]) / (2 * self.dx)
+            dpdy = np.zeros_like(v)
+            dpdy[1:-1, :] = (p[2:, :] - p[:-2, :]) / (2 * self.dy)
+
+            u_star[1:-1, 1:-1] += self.dt * (self.nu * lap_u[1:-1, 1:-1] - (1 / self.rho) * dpdx[1:-1, 1:-1])
+            v_star[1:-1, 1:-1] += self.dt * (self.nu * lap_v[1:-1, 1:-1] - (1 / self.rho) * dpdy[1:-1, 1:-1])
 
             u_star[0, :] = 0.0
             u_star[-1, :] = 0.0
@@ -404,36 +335,30 @@ class BlowSuctionSolver:
             v_star[:, 0] = 0.0
             v_star[:, -1] = 0.0
 
+            # Step 2: divergence of tentative velocity
             div = (
                 (u_star[1:-1, 2:] - u_star[1:-1, :-2]) / (2 * self.dx)
                 + (v_star[2:, 1:-1] - v_star[:-2, 1:-1]) / (2 * self.dy)
             )
-            rhs = (self.rho / self.dt) * div
-            p_int = spsolve(self.P, rhs.ravel())
-            p[1:-1, 1:-1] = p_int.reshape(self.Ny - 2, self.Nx - 2)
-            p[0, :] = 0.0
-            p[-1, :] = 0.0
-            p[:, 0] = 0.0
-            p[:, -1] = 0.0
 
-            dpdx = (p[1:-1, 2:] - p[1:-1, :-2]) / (2 * self.dx)
-            dpdy = (p[2:, 1:-1] - p[:-2, 1:-1]) / (2 * self.dy)
-            u_new = u_star.copy()
-            v_new = v_star.copy()
-            u_new[1:-1, 1:-1] -= self.dt / self.rho * dpdx
-            v_new[1:-1, 1:-1] -= self.dt / self.rho * dpdy
+            # Step 3: explicit pressure correction
+            p[1:-1, 1:-1] -= self.rho * self.cp * self.dt * div
 
-            u_new[0, :] = 0.0
-            u_new[-1, :] = 0.0
-            u_new[:, 0] = 0.0
-            u_new[:, -1] = 0.0
-            v_new[0, :] = self.wall_profile(t)
-            v_new[-1, :] = 0.0
-            v_new[:, 0] = 0.0
-            v_new[:, -1] = 0.0
+            # Step 4: velocity projection
+            dpdx_new = (p[1:-1, 2:] - p[1:-1, :-2]) / (2 * self.dx)
+            dpdy_new = (p[2:, 1:-1] - p[:-2, 1:-1]) / (2 * self.dy)
+            u[1:-1, 1:-1] = u_star[1:-1, 1:-1] - (self.dt / self.rho) * dpdx_new
+            v[1:-1, 1:-1] = v_star[1:-1, 1:-1] - (self.dt / self.rho) * dpdy_new
 
-            u = u_new
-            v = v_new
+            u[0, :] = 0.0
+            u[-1, :] = 0.0
+            u[:, 0] = 0.0
+            u[:, -1] = 0.0
+            v[0, :] = self.wall_profile(t)
+            v[-1, :] = 0.0
+            v[:, 0] = 0.0
+            v[:, -1] = 0.0
+
             frames_u.append(u.copy())
             frames_v.append(v.copy())
 
@@ -442,102 +367,5 @@ class BlowSuctionSolver:
         return frames_u, frames_v, self.time
 
     def run(self):
-        """Run the solver using an implicit diffusion step."""
-        return self.run_implicit()
-
-    def _implicit_step(self, field, bc):
-        """Solve (I - dt nu ∇²) field = rhs with boundary conditions ``bc``.
-
-        Parameters
-        ----------
-        field : ndarray
-            Array containing the previous time level values.
-        bc : ndarray
-            Array with the boundary values for the new time level.
-        """
-        rx = self.nu * self.dt / self.dx ** 2
-        ry = self.nu * self.dt / self.dy ** 2
-        rhs = field.copy()
-        rhs[0, :] = bc[0, :]
-        rhs[-1, :] = bc[-1, :]
-        rhs[:, 0] = bc[:, 0]
-        rhs[:, -1] = bc[:, -1]
-        b = rhs[1:-1, 1:-1].copy()
-        b[:, 0] += rx * bc[1:-1, 0]
-        b[:, -1] += rx * bc[1:-1, -1]
-        b[0, :] += ry * bc[0, 1:-1]
-        b[-1, :] += ry * bc[-1, 1:-1]
-        sol = spsolve(self.H, b.ravel())
-        out = bc.copy()
-        out[1:-1, 1:-1] = sol.reshape(self.Ny - 2, self.Nx - 2)
-        return out
-
-    def run_implicit(self):
-        """March the solution using an implicit diffusion projection method."""
-        u = np.zeros((self.Ny, self.Nx))
-        v = np.zeros_like(u)
-        p = np.zeros_like(u)
-        frames_u = []
-        frames_v = []
-        if self.verbose:
-            self.stability_report()
-        for n, t in enumerate(self.time):
-            if self.verbose and n % 10 == 0:
-                print(f"[blow] step {n}/{self.Nt}")
-
-            bc_u = np.zeros_like(u)
-            bc_v = np.zeros_like(v)
-            bc_v[0, :] = self.wall_profile(t)
-
-            u_star = self._implicit_step(u, bc_u)
-            v_star = self._implicit_step(v, bc_v)
-
-            div = (
-                    (u_star[1:-1, 2:] - u_star[1:-1, :-2]) / (2 * self.dx)
-                    + (v_star[2:, 1:-1] - v_star[:-2, 1:-1]) / (2 * self.dy)
-            )
-            rhs = (self.rho / self.dt) * div
-            rhs = rhs.ravel()
-            rhs -= rhs.mean()
-            rhs[0] = 0.0
-            p_int = spsolve(self.P, rhs)
-            p[1:-1, 1:-1] = p_int.reshape(self.Ny - 2, self.Nx - 2)
-            p[0, 1:-1] = p[1, 1:-1]
-            p[-1, 1:-1] = p[-2, 1:-1]
-            p[:, 0] = p[:, 1]
-            p[:, -1] = p[:, -2]
-
-            dpdx = (p[1:-1, 2:] - p[1:-1, :-2]) / (2 * self.dx)
-            dpdy = (p[2:, 1:-1] - p[:-2, 1:-1]) / (2 * self.dy)
-            u_new = u_star.copy()
-            v_new = v_star.copy()
-            u_new[1:-1, 1:-1] -= self.dt / self.rho * dpdx
-            v_new[1:-1, 1:-1] -= self.dt / self.rho * dpdy
-
-            u_new[0, :] = 0.0
-            u_new[-1, :] = 0.0
-            u_new[:, 0] = 0.0
-            u_new[:, -1] = 0.0
-            v_new[0, :] = self.wall_profile(t)
-            v_new[-1, :] = 0.0
-            v_new[:, 0] = 0.0
-            v_new[:, -1] = 0.0
-
-            u = u_new
-            v = v_new
-
-            if self.verbose:
-                divU = (
-                    (u[1:-1, 2:] - u[1:-1, :-2]) / (2 * self.dx)
-                    + (v[2:, 1:-1] - v[:-2, 1:-1]) / (2 * self.dy)
-                )
-                div_norm = np.linalg.norm(divU.ravel(), ord=2)
-                ke = np.sum(u ** 2 + v ** 2)
-                print(f"    div L2={div_norm:.3e}, KE={ke:.3e}")
-
-            frames_u.append(u.copy())
-            frames_v.append(v.copy())
-
-        frames_u = np.array(frames_u)
-        frames_v = np.array(frames_v)
-        return frames_u, frames_v, self.time
+        """Run the solver."""
+        return self.run_explicit()

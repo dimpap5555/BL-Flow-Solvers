@@ -88,15 +88,15 @@ def blow_suction_example():
     """Run a simple demonstration of the BlowSuctionSolver."""
     rho = 1.0
     nu = 1e-3
-    x = np.linspace(0.0, 1.0, 100)
-    y = np.linspace(0.0, 0.05, 5)
-    dt = 1e-2
-    Nt = 30
+    x = np.linspace(0.0, 1.0, 1000)
+    y = np.linspace(0.0, 0.05, 50)
+    dt = 1e-4
+    Nt = 1000
 
     def wall(t, x):
-        return 0.1 * np.sin(2 * np.pi * t) * np.ones_like(x)
+        return 0.1 * np.sin(10 * np.pi * t + 2 * np.pi * 2 * x) * np.ones_like(x)
 
-    solver = BlowSuctionSolver(rho, nu, x, y, dt, Nt, wall, verbose=True)
+    solver = BlowSuctionSolver(rho, nu, x, y, dt, Nt, wall, cp=0.5, verbose=True)
     solver.stability_report()
     frames_u, frames_v, time = solver.run()
 
@@ -137,7 +137,7 @@ def _visualize_blow_suction(frames_u, frames_v, x, y, time):
         ax2.set_xlabel('x [m]'); ax2.set_ylabel('y [m]'); ax2.set_title(f'v at t={time[k]:.3e}s')
         ax3.set_xlabel('Time [s]'); ax3.set_ylabel('Max |v| [m/s]')
 
-    FuncAnimation(fig, animate, frames=len(time), interval=100)
+    ani = FuncAnimation(fig, animate, frames=len(time), interval=100)
     plt.tight_layout()
     plt.show()
 
