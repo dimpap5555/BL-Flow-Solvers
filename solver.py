@@ -267,8 +267,69 @@ class BlowSuctionSolver:
         self.Ny = len(self.y)
         self.time = np.arange(Nt) * dt
 
+        # Matrices for the implicit projection scheme
+        self._diff_A = None
+        self._pois_A = None
+        self._aP = self._aW = self._aE = self._aS = self._aN = None
+
     def wall_profile(self, t):
         return self.wall_func(t, self.x)
+
+    def _build_matrix(self, aP, aW, aE, aS, aN):
+        """Assemble a 5-point stencil sparse matrix with Dirichlet boundaries."""
+        Nx_i = self.Nx - 2
+        Ny_i = self.Ny - 2
+        rows, cols, data = [], [], []
+
+        def idx(j, i):
+            return j * Nx_i + i
+
+        for j in range(Ny_i):
+            for i in range(Nx_i):
+                k = idx(j, i)
+                rows.append(k)
+                cols.append(k)
+                data.append(aP)
+                if i > 0:
+                    rows.append(k)
+                    cols.append(idx(j, i - 1))
+                    data.append(aW)
+                if i < Nx_i - 1:
+                    rows.append(k)
+                    cols.append(idx(j, i + 1))
+                    data.append(aE)
+                if j > 0:
+                    rows.append(k)
+                    cols.append(idx(j - 1, i))
+                    data.append(aS)
+                if j < Ny_i - 1:
+                    rows.append(k)
+                    cols.append(idx(j + 1, i))
+                    data.append(aN)
+
+        N = Nx_i * Ny_i
+        return sparse.csr_matrix((data, (rows, cols)), shape=(N, N))
+
+    def _setup_implicit(self):
+        """Precompute matrices for the implicit solver."""
+        if self._diff_A is not None:
+            return
+
+        inv_dt = 1.0 / self.dt
+        aP = inv_dt + 2 * self.nu / self.dx ** 2 + 2 * self.nu / self.dy ** 2
+        aW = -self.nu / self.dx ** 2
+        aE = -self.nu / self.dx ** 2
+        aS = -self.nu / self.dy ** 2
+        aN = -self.nu / self.dy ** 2
+        self._aP, self._aW, self._aE, self._aS, self._aN = aP, aW, aE, aS, aN
+        self._diff_A = self._build_matrix(aP, aW, aE, aS, aN)
+
+        ap = -2 * (1 / self.dx ** 2 + 1 / self.dy ** 2)
+        aw = 1 / self.dx ** 2
+        ae = 1 / self.dx ** 2
+        a_s = 1 / self.dy ** 2
+        a_n = 1 / self.dy ** 2
+        self._pois_A = self._build_matrix(ap, aw, ae, a_s, a_n)
 
     def stability_report(self):
         """Return diffusion and pressure stability metrics."""
@@ -366,6 +427,97 @@ class BlowSuctionSolver:
         frames_v = np.array(frames_v)
         return frames_u, frames_v, self.time
 
-    def run(self):
-        """Run the solver."""
-        return self.run_explicit()
+    def run_implicit(self):
+        """Advance the solution using a fully implicit projection scheme."""
+        self._setup_implicit()
+
+        u = np.zeros((self.Ny, self.Nx))
+        v = np.zeros_like(u)
+        p = np.zeros_like(u)
+        frames_u = []
+        frames_v = []
+        inv_dt = 1.0 / self.dt
+        Nx_i = self.Nx - 2
+        Ny_i = self.Ny - 2
+
+        for n, t in enumerate(self.time):
+            if self.verbose and n % 10 == 0:
+                print(f"[blow-imp] step {n}/{self.Nt}")
+
+            v[0, :] = self.wall_profile(t)
+
+            dpdx = np.zeros_like(u)
+            dpdx[:, 1:-1] = (p[:, 2:] - p[:, :-2]) / (2 * self.dx)
+            dpdy = np.zeros_like(v)
+            dpdy[1:-1, :] = (p[2:, :] - p[:-2, :]) / (2 * self.dy)
+
+            rhs_u = inv_dt * u - (1 / self.rho) * dpdx
+            rhs_v = inv_dt * v - (1 / self.rho) * dpdy
+
+            b_u = rhs_u[1:-1, 1:-1].copy()
+            b_u[:, 0] -= self._aW * u[1:-1, 0]
+            b_u[:, -1] -= self._aE * u[1:-1, -1]
+            b_u[0, :] -= self._aS * u[0, 1:-1]
+            b_u[-1, :] -= self._aN * u[-1, 1:-1]
+
+            b_v = rhs_v[1:-1, 1:-1].copy()
+            b_v[:, 0] -= self._aW * v[1:-1, 0]
+            b_v[:, -1] -= self._aE * v[1:-1, -1]
+            b_v[0, :] -= self._aS * v[0, 1:-1]
+            b_v[-1, :] -= self._aN * v[-1, 1:-1]
+
+            sol_u = spsolve(self._diff_A, b_u.ravel())
+            sol_v = spsolve(self._diff_A, b_v.ravel())
+
+            u_star = u.copy()
+            v_star = v.copy()
+            u_star[1:-1, 1:-1] = sol_u.reshape(Ny_i, Nx_i)
+            v_star[1:-1, 1:-1] = sol_v.reshape(Ny_i, Nx_i)
+
+            u_star[0, :] = 0.0
+            u_star[-1, :] = 0.0
+            u_star[:, 0] = 0.0
+            u_star[:, -1] = 0.0
+            v_star[0, :] = self.wall_profile(t)
+            v_star[-1, :] = 0.0
+            v_star[:, 0] = 0.0
+            v_star[:, -1] = 0.0
+
+            div = (
+                    (u_star[1:-1, 2:] - u_star[1:-1, :-2]) / (2 * self.dx)
+                    + (v_star[2:, 1:-1] - v_star[:-2, 1:-1]) / (2 * self.dy)
+            )
+
+            rhs_p = (self.rho / self.dt) * div
+            sol_p = spsolve(self._pois_A, rhs_p.ravel())
+            phi = np.zeros_like(p)
+            phi[1:-1, 1:-1] = sol_p.reshape(Ny_i, Nx_i)
+
+            u_new = u_star.copy()
+            v_new = v_star.copy()
+            u_new[1:-1, 1:-1] -= (self.dt / self.rho) * (
+                    (phi[1:-1, 2:] - phi[1:-1, :-2]) / (2 * self.dx)
+            )
+            v_new[1:-1, 1:-1] -= (self.dt / self.rho) * (
+                    (phi[2:, 1:-1] - phi[:-2, 1:-1]) / (2 * self.dy)
+            )
+
+            u_new[0, :] = 0.0
+            u_new[-1, :] = 0.0
+            u_new[:, 0] = 0.0
+            u_new[:, -1] = 0.0
+            v_new[0, :] = self.wall_profile(t)
+            v_new[-1, :] = 0.0
+            v_new[:, 0] = 0.0
+            v_new[:, -1] = 0.0
+
+            p[1:-1, 1:-1] += phi[1:-1, 1:-1]
+
+            u, v = u_new, v_new
+
+            frames_u.append(u.copy())
+            frames_v.append(v.copy())
+
+        frames_u = np.array(frames_u)
+        frames_v = np.array(frames_v)
+        return frames_u, frames_v, self.time
