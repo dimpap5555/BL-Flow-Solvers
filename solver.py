@@ -270,8 +270,9 @@ class BlowSuctionSolver:
         # Matrices for the implicit projection scheme
         self._diff_A = None
         self._pois_A = None
-        self._pois_dirichlet_top = None
         self._aP = self._aW = self._aE = self._aS = self._aN = None
+        # store interior sizes for reuse
+        self._Nx_i = self._Ny_i = None
 
     def wall_profile(self, t):
         return self.wall_func(t, self.x)
@@ -311,6 +312,71 @@ class BlowSuctionSolver:
         N = Nx_i * Ny_i
         return sparse.csr_matrix((data, (rows, cols)), shape=(N, N))
 
+    def _build_poisson_mixed(self):
+        Nx_i = self.Nx - 2
+        Ny_i = self.Ny - 2
+        rows, cols, data = [], [], []
+
+        def K(j, i):
+            return j * Nx_i + i
+
+        dx2 = self.dx * self.dx
+        dy2 = self.dy * self.dy
+
+        for j in range(Ny_i):
+            for i in range(Nx_i):
+                k = K(j, i)
+                diag = 0.0
+
+                # West (Neumann zero)
+                if i == 0:
+                    rows += [k, k]
+                    cols += [K(j, i + 1), k]
+                    data += [1.0 / dx2, -1.0 / dx2]
+                else:
+                    rows.append(k)
+                    cols.append(K(j, i - 1))
+                    data.append(1.0 / dx2)
+                    diag -= 1.0 / dx2
+
+                # East (Neumann zero)
+                if i == Nx_i - 1:
+                    rows += [k, k]
+                    cols += [K(j, i - 1), k]
+                    data += [1.0 / dx2, -1.0 / dx2]
+                else:
+                    rows.append(k)
+                    cols.append(K(j, i + 1))
+                    data.append(1.0 / dx2)
+                    diag -= 1.0 / dx2
+
+                # South (bottom) Neumann zero
+                if j == 0:
+                    rows += [k, k]
+                    cols += [K(j + 1, i), k]
+                    data += [1.0 / dy2, -1.0 / dy2]
+                else:
+                    rows.append(k)
+                    cols.append(K(j - 1, i))
+                    data.append(1.0 / dy2)
+                    diag -= 1.0 / dy2
+
+                # North (top) Dirichlet p=0 handled later
+                if j == Ny_i - 1:
+                    diag -= 1.0 / dy2
+                else:
+                    rows.append(k)
+                    cols.append(K(j + 1, i))
+                    data.append(1.0 / dy2)
+                    diag -= 1.0 / dy2
+
+                rows.append(k)
+                cols.append(k)
+                data.append(-diag)
+
+        N = Nx_i * Ny_i
+        return sparse.csr_matrix((data, (rows, cols)), shape=(N, N))
+
     def _setup_implicit(self, theta):
         """Precompute matrices for the implicit solver.
 
@@ -339,50 +405,61 @@ class BlowSuctionSolver:
             self._diff_lu = splu(self._diff_A.tocsc())
             self._theta = theta
 
+        # store interior sizes
+        self._Nx_i = self.Nx - 2
+        self._Ny_i = self.Ny - 2
+
         if self._pois_A is None:
-            Nx_i = self.Nx - 2
-            Ny_i = self.Ny - 2
-
-            def grad_mat(n, h):
-                off = np.ones(n - 1) / (2 * h)
-                G = sparse.diags([-off, off], [-1, 1], shape=(n, n), format="lil")
-                G[0, 0] = -1.0 / h
-                G[0, 1] = 1.0 / h
-                G[-1, -2] = -1.0 / h
-                G[-1, -1] = 1.0 / h
-                return G.tocsr()
-
-            Gx1 = grad_mat(Nx_i, self.dx)
-            Gy1 = grad_mat(Ny_i, self.dy)
-            Dx1 = -Gx1.T
-            Dy1 = -Gy1.T
-
-            Ix = sparse.eye(Nx_i)
-            Iy = sparse.eye(Ny_i)
-
-            # grad in x/y acting on interior scalars
-            self._Gx = sparse.kron(Iy, Gx1)
-            self._Gy = sparse.kron(Gy1, Ix)
-
-            # div pieces acting on interior velocities
-            self._Du = sparse.kron(Iy, Dx1)
-            self._Dv = sparse.kron(Dy1, Ix)
-
-            A = self._Du @ self._Gx + self._Dv @ self._Gy
-            A = A.tolil()
-
-            dirichlet_top = []
-            for ii in range(Nx_i):
-                k = (Ny_i - 1) * Nx_i + ii
-                dirichlet_top.append(k)
-            for k in dirichlet_top:
-                A[k, :] = 0.0
-                A[:, k] = 0.0
-                A[k, k] = 1.0
-
-            self._pois_dirichlet_top = np.array(dirichlet_top, dtype=int)
-            self._pois_A = A.tocsc()
+            self._pois_A = self._build_poisson_mixed().tocsc()
             self._pois_lu = splu(self._pois_A)
+
+    def _assemble_poisson_rhs(self, u_star, v_star, wall_v):
+        Nx_i, Ny_i = self._Nx_i, self._Ny_i
+        dx, dy = self.dx, self.dy
+        u_int = u_star[1:-1, 1:-1].ravel()
+        v_int = v_star[1:-1, 1:-1].ravel()
+
+        div = np.zeros(Nx_i * Ny_i, dtype=float)
+
+        def K(j, i):
+            return j * Nx_i + i
+
+        # du/dx
+        for j in range(Ny_i):
+            for i in range(Nx_i):
+                k = K(j, i)
+                if i == 0:
+                    uP = u_star[j + 1, i + 1]
+                    uE = u_star[j + 1, i + 2]
+                    div[k] += (uE - uP) / dx
+                elif i == Nx_i - 1:
+                    uW = u_star[j + 1, i]
+                    uP = u_star[j + 1, i + 1]
+                    div[k] += (uP - uW) / dx
+                else:
+                    uE = u_star[j + 1, i + 2]
+                    uW = u_star[j + 1, i]
+                    div[k] += (uE - uW) / (2 * dx)
+
+        # dv/dy with bottom one-sided using wall_v
+        for j in range(Ny_i):
+            for i in range(Nx_i):
+                k = K(j, i)
+                if j == 0:
+                    vN = v_star[j + 2, i + 1]
+                    vW = wall_v[i + 1]
+                    div[k] += (vN - vW) / dy
+                elif j == Ny_i - 1:
+                    vS = v_star[j, i + 1]
+                    vP = v_star[j + 1, i + 1]
+                    div[k] += (vP - vS) / dy
+                else:
+                    vN = v_star[j + 2, i + 1]
+                    vS = v_star[j, i + 1]
+                    div[k] += (vN - vS) / (2 * dy)
+
+        rhs = (self.rho / self.dt) * div
+        return rhs
 
     def stability_report(self):
         """Return diffusion and pressure stability metrics."""
@@ -528,8 +605,6 @@ class BlowSuctionSolver:
         frames_v = []
         frames_p = []
         inv_dt = 1.0 / self.dt
-        Nx_i = self.Nx - 2
-        Ny_i = self.Ny - 2
 
         print(
             f"[cfg] Nx={self.Nx}, Ny={self.Ny}, dx={self.dx:.3e}, dy={self.dy:.3e}, dt={self.dt:.3e}, theta=1.0"
@@ -538,6 +613,8 @@ class BlowSuctionSolver:
         for n, t in enumerate(self.time):
             theta_n = 1.0
             self._setup_implicit(theta_n)
+
+            Nx_i, Ny_i = self._Nx_i, self._Ny_i
 
             # Enforce wall boundary for the current time level
             wall_v = self.wall_profile(t)
@@ -594,17 +671,8 @@ class BlowSuctionSolver:
             v_star[:, 0] = v_star[:, 1]
             v_star[:, -1] = v_star[:, -2]
 
-            u_int = u_star[1:-1, 1:-1].ravel()
-            v_int = v_star[1:-1, 1:-1].ravel()
-
-            div_flat = (self._Du @ u_int) + (self._Dv @ v_int)
-            v1 = v_star[1, 1:-1]
-            bc_bottom = (self.rho / self.dt) * (v1 - wall_v[1:-1]) / self.dy
-            div_flat[:Nx_i] += bc_bottom
-
-            rhs_flat = div_flat.astype(float).copy()
-            # Enforce Dirichlet p=0 at top rows by setting RHS to that value (0.0)
-            rhs_flat[self._pois_dirichlet_top] = 0.0
+            div_flat = self._assemble_poisson_rhs(u_star, v_star, wall_v)
+            rhs_flat = div_flat.copy()
             print(
                 f"[pois] rhs_sum={rhs_flat.sum():.3e}, rhs_inf={np.max(np.abs(rhs_flat)):.3e}"
             )
@@ -616,8 +684,32 @@ class BlowSuctionSolver:
                 f"[pois] res_inf={np.max(np.abs(r)):.3e}, res_L2={np.linalg.norm(r):.3e}"
             )
 
-            gradx_phi = (self._Gx @ phi_int).reshape(Ny_i, Nx_i)
-            grady_phi = (self._Gy @ phi_int).reshape(Ny_i, Nx_i)
+            gradx_phi = np.zeros((Ny_i, Nx_i))
+            grady_phi = np.zeros((Ny_i, Nx_i))
+            dx, dy = self.dx, self.dy
+            for j in range(Ny_i):
+                for i in range(Nx_i):
+                    k = j * Nx_i + i
+                    if i == 0:
+                        phiE = phi_int[k + 1]
+                        phiP = phi_int[k]
+                        gradx_phi[j, i] = (phiE - phiP) / dx
+                    elif i == Nx_i - 1:
+                        phiP = phi_int[k]
+                        phiW = phi_int[k - 1]
+                        gradx_phi[j, i] = (phiP - phiW) / dx
+                    else:
+                        gradx_phi[j, i] = (phi_int[k + 1] - phi_int[k - 1]) / (2 * dx)
+                    if j == 0:
+                        phiN = phi_int[k + Nx_i]
+                        phiP = phi_int[k]
+                        grady_phi[j, i] = (phiN - phiP) / dy
+                    elif j == Ny_i - 1:
+                        phiP = phi_int[k]
+                        phiS = phi_int[k - Nx_i]
+                        grady_phi[j, i] = (phiP - phiS) / dy
+                    else:
+                        grady_phi[j, i] = (phi_int[k + Nx_i] - phi_int[k - Nx_i]) / (2 * dy)
             u_new = u_star.copy()
             v_new = v_star.copy()
             u_new[1:-1, 1:-1] -= (self.dt / self.rho) * gradx_phi
@@ -634,13 +726,10 @@ class BlowSuctionSolver:
 
             p[1:-1, 1:-1] += phi_int.reshape(Ny_i, Nx_i)
 
-            u_int_new = u_new[1:-1, 1:-1].ravel()
-            v_int_new = v_new[1:-1, 1:-1].ravel()
-            rhs_chk = (self._Du @ u_int_new) + (self._Dv @ v_int_new)
-            rhs_chk[:Nx_i] += (
-                    self.rho / self.dt * (v_new[1, 1:-1] - wall_v[1:-1]) / self.dy
+            rhs_chk = self._assemble_poisson_rhs(u_new, v_new, wall_v)
+            print(
+                f"[chk] sum(rhs_after)={rhs_chk.sum():.3e}, inf={np.max(np.abs(rhs_chk)):.3e}"
             )
-            print(f"[chk] sum(rhs_after)={rhs_chk.sum():.3e}")
 
             # Diagnostics and flux balances
             div_new = rhs_chk
