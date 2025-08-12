@@ -517,7 +517,7 @@ class BlowSuctionSolver:
         inv_dt = 1.0 / self.dt
         Nx_i = self.Nx - 2
         Ny_i = self.Ny - 2
-        warmup_steps = 5
+        warmup_steps = 10
 
         for n, t in enumerate(self.time):
             theta_n = 1.0 if n < warmup_steps else theta
@@ -573,15 +573,30 @@ class BlowSuctionSolver:
             u_star[-1, :] = u_star[-2, :]
             u_star[:, 0] = u_star[:, 1]
             u_star[:, -1] = u_star[:, -2]
-            v_star[0, :] = self.wall_profile(t)
+            wall_v = self.wall_profile(t)
+            v_star[0, :] = wall_v
             v_star[-1, :] = v_star[-2, :]
             v_star[:, 0] = v_star[:, 1]
             v_star[:, -1] = v_star[:, -2]
 
-            div = (
-                (u_star[1:-1, 2:] - u_star[1:-1, :-2]) / (2 * self.dx)
-                + (v_star[2:, 1:-1] - v_star[:-2, 1:-1]) / (2 * self.dy)
-            )
+            # Build divergence on the interior (Ny_i, Nx_i) using boundary-consistent stencils
+            div = np.zeros((Ny_i, Nx_i))
+
+            # \u2202u/\u2202x
+            # interior columns (centered)
+            div[:, 1:-1] += (u_star[1:-1, 3:-1] - u_star[1:-1, 1:-3]) / (2 * self.dx)
+            # first interior column (forward)
+            div[:, 0] += (u_star[1:-1, 2] - u_star[1:-1, 1]) / self.dx
+            # last interior column (backward)
+            div[:, -1] += (u_star[1:-1, -2] - u_star[1:-1, -3]) / self.dx
+
+            # \u2202v/\u2202y
+            # interior rows (centered)
+            div[1:-1, :] += (v_star[3:-1, 1:-1] - v_star[1:-3, 1:-1]) / (2 * self.dy)
+            # first interior row next to bottom wall (use wall BC: one-sided)
+            div[0, :] += (v_star[1, 1:-1] - wall_v[1:-1]) / self.dy
+            # last interior row near top (Neumann 0 at top: one-sided)
+            div[-1, :] += (v_star[-1, 1:-1] - v_star[-2, 1:-1]) / self.dy
 
             rhs_p = (self.rho / self.dt) * div
 
@@ -595,8 +610,8 @@ class BlowSuctionSolver:
 
             # reconstruct ghost cells for consistent gradients
             phi[0, 1:-1] = (
-                    phi[1, 1:-1]
-                    - self.dy * (self.rho / self.dt) * (v_star[1, 1:-1] - wall_v[1:-1])
+                phi[1, 1:-1]
+                - self.dy * (self.rho / self.dt) * (v_star[1, 1:-1] - wall_v[1:-1])
             )
             phi[-1, 1:-1] = phi[-2, 1:-1]
             phi[:, 0] = phi[:, 1]
@@ -615,7 +630,7 @@ class BlowSuctionSolver:
             u_new[-1, :] = u_new[-2, :]
             u_new[:, 0] = u_new[:, 1]
             u_new[:, -1] = u_new[:, -2]
-            v_new[0, :] = self.wall_profile(t)
+            v_new[0, :] = wall_v
             v_new[-1, :] = v_new[-2, :]
             v_new[:, 0] = v_new[:, 1]
             v_new[:, -1] = v_new[:, -2]
@@ -625,10 +640,13 @@ class BlowSuctionSolver:
             p -= np.mean(p)
 
             # diagnostics
-            div_new = (
-                (u_new[1:-1, 2:] - u_new[1:-1, :-2]) / (2 * self.dx)
-                + (v_new[2:, 1:-1] - v_new[:-2, 1:-1]) / (2 * self.dy)
-            )
+            div_new = np.zeros((Ny_i, Nx_i))
+            div_new[:, 1:-1] += (u_new[1:-1, 3:-1] - u_new[1:-1, 1:-3]) / (2 * self.dx)
+            div_new[:, 0] += (u_new[1:-1, 2] - u_new[1:-1, 1]) / self.dx
+            div_new[:, -1] += (u_new[1:-1, -2] - u_new[1:-1, -3]) / self.dx
+            div_new[1:-1, :] += (v_new[3:-1, 1:-1] - v_new[1:-3, 1:-1]) / (2 * self.dy)
+            div_new[0, :] += (v_new[1, 1:-1] - wall_v[1:-1]) / self.dy
+            div_new[-1, :] += (v_new[-1, 1:-1] - v_new[-2, 1:-1]) / self.dy
             div_norm = np.max(np.abs(div_new))
             wall_flux = np.trapezoid(v_new[0, :], self.x)
             top_flux = np.trapezoid(v_new[-1, :], self.x)
