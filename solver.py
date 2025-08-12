@@ -312,7 +312,7 @@ class BlowSuctionSolver:
         N = Nx_i * Ny_i
         return sparse.csr_matrix((data, (rows, cols)), shape=(N, N))
 
-    def _build_poisson_mixed(self):
+    def _build_poisson_neumann_with_pin(self):
         Nx_i = self.Nx - 2
         Ny_i = self.Ny - 2
         rows, cols, data = [], [], []
@@ -350,7 +350,7 @@ class BlowSuctionSolver:
                     data.append(1.0 / dx2)
                     diag -= 1.0 / dx2
 
-                # South (bottom) Neumann zero
+                # South (Neumann zero)
                 if j == 0:
                     rows += [k, k]
                     cols += [K(j + 1, i), k]
@@ -361,9 +361,11 @@ class BlowSuctionSolver:
                     data.append(1.0 / dy2)
                     diag -= 1.0 / dy2
 
-                # North (top) Dirichlet p=0 handled later
+                # North (Neumann zero)
                 if j == Ny_i - 1:
-                    diag -= 1.0 / dy2
+                    rows += [k, k]
+                    cols += [K(j - 1, i), k]
+                    data += [1.0 / dy2, -1.0 / dy2]
                 else:
                     rows.append(k)
                     cols.append(K(j + 1, i))
@@ -375,7 +377,13 @@ class BlowSuctionSolver:
                 data.append(-diag)
 
         N = Nx_i * Ny_i
-        return sparse.csr_matrix((data, (rows, cols)), shape=(N, N))
+        A = sparse.csr_matrix((data, (rows, cols)), shape=(N, N))
+        pin = 0
+        A = A.tolil()
+        A[pin, :] = 0.0
+        A[:, pin] = 0.0
+        A[pin, pin] = 1.0
+        return A.tocsc(), pin
 
     def _setup_implicit(self, theta):
         """Precompute matrices for the implicit solver.
@@ -410,7 +418,7 @@ class BlowSuctionSolver:
         self._Ny_i = self.Ny - 2
 
         if self._pois_A is None:
-            self._pois_A = self._build_poisson_mixed().tocsc()
+            self._pois_A, self._pois_pin = self._build_poisson_neumann_with_pin()
             self._pois_lu = splu(self._pois_A)
 
     def _assemble_poisson_rhs(self, u_star, v_star, wall_v):
@@ -421,47 +429,33 @@ class BlowSuctionSolver:
         def K(j, i):
             return j * Nx_i + i
 
-        # du/dx (Neumann-zero at left/right via one-sided interior-only diffs)
+        # du/dx (unchanged)
         for j in range(Ny_i):
-            jj = j + 1  # interior row index in full grid
+            jj = j + 1
             for i in range(Nx_i):
                 ii = i + 1
                 k = K(j, i)
                 if i == 0:
-                    uP = u_star[jj, ii]
-                    uE = u_star[jj, ii + 1]
-                    div[k] += (uE - uP) / dx
+                    div[k] += (u_star[jj, ii + 1] - u_star[jj, ii]) / dx
                 elif i == Nx_i - 1:
-                    uW = u_star[jj, ii - 1]
-                    uP = u_star[jj, ii]
-                    div[k] += (uP - uW) / dx
+                    div[k] += (u_star[jj, ii] - u_star[jj, ii - 1]) / dx
                 else:
-                    uE = u_star[jj, ii + 1]
-                    uW = u_star[jj, ii - 1]
-                    div[k] += (uE - uW) / (2 * dx)
+                    div[k] += (u_star[jj, ii + 1] - u_star[jj, ii - 1]) / (2 * dx)
 
-        # dv/dy (IMPORTANT: no wall_v here; use interior-only diffs)
+        # dv/dy  — USE wall_v at the bottom
         for j in range(Ny_i):
             jj = j + 1
             for i in range(Nx_i):
                 ii = i + 1
                 k = K(j, i)
                 if j == 0:
-                    # forward diff using the first two interior rows (jj=1,2)
-                    vP = v_star[jj, ii]
-                    vN = v_star[jj + 1, ii]
-                    div[k] += (vN - vP) / dy
+                    # first interior row: one-sided with prescribed wall velocity
+                    div[k] += (v_star[jj, ii] - wall_v[ii]) / dy
                 elif j == Ny_i - 1:
-                    # backward diff using the last two interior rows
-                    vS = v_star[jj - 1, ii]
-                    vP = v_star[jj, ii]
-                    div[k] += (vP - vS) / dy
+                    div[k] += (v_star[jj, ii] - v_star[jj - 1, ii]) / dy
                 else:
-                    vN = v_star[jj + 1, ii]
-                    vS = v_star[jj - 1, ii]
-                    div[k] += (vN - vS) / (2 * dy)
+                    div[k] += (v_star[jj + 1, ii] - v_star[jj - 1, ii]) / (2 * dy)
 
-        # Poisson RHS: ∇²φ = (ρ/Δt) ∇·u*
         return (self.rho / self.dt) * div
 
     def stability_report(self):
@@ -674,18 +668,16 @@ class BlowSuctionSolver:
             v_star[:, 0] = v_star[:, 1]
             v_star[:, -1] = v_star[:, -2]
 
-            div_flat = self._assemble_poisson_rhs(u_star, v_star, wall_v)
-            rhs_flat = div_flat.copy()
-            print(
-                f"[pois] rhs_sum={rhs_flat.sum():.3e}, rhs_inf={np.max(np.abs(rhs_flat)):.3e}"
-            )
+            rhs_flat = self._assemble_poisson_rhs(u_star, v_star, wall_v)
+            rhs_mean = rhs_flat.mean()
+            rhs_flat -= rhs_mean
+            rhs_flat[self._pois_pin] = 0.0
 
             phi_int = self._pois_lu.solve(rhs_flat)
 
             r = self._pois_A @ phi_int - rhs_flat
-            print(
-                f"[pois] res_inf={np.max(np.abs(r)):.3e}, res_L2={np.linalg.norm(r):.3e}"
-            )
+            res_inf = np.max(np.abs(r))
+            print(f"[pois] rhs_mean={rhs_mean:.3e}, res_inf={res_inf:.3e}")
 
             gradx_phi = np.zeros((Ny_i, Nx_i))
             grady_phi = np.zeros((Ny_i, Nx_i))
@@ -730,9 +722,8 @@ class BlowSuctionSolver:
             p[1:-1, 1:-1] += phi_int.reshape(Ny_i, Nx_i)
 
             rhs_chk = self._assemble_poisson_rhs(u_new, v_new, wall_v)
-            print(
-                f"[chk] sum(rhs_after)={rhs_chk.sum():.3e}, inf={np.max(np.abs(rhs_chk)):.3e}"
-            )
+            max_div = np.max(np.abs(rhs_chk)) * self.dt / self.rho
+            print(f"[chk] max_div={max_div:.3e}")
 
             # Diagnostics and flux balances
             div_new = rhs_chk
