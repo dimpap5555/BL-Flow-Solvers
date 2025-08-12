@@ -270,7 +270,7 @@ class BlowSuctionSolver:
         # Matrices for the implicit projection scheme
         self._diff_A = None
         self._pois_A = None
-        self._pois_pin = None
+        self._pois_dirichlet_top = None
         self._aP = self._aW = self._aE = self._aS = self._aN = None
 
     def wall_profile(self, t):
@@ -371,17 +371,18 @@ class BlowSuctionSolver:
             A = self._Du @ self._Gx + self._Dv @ self._Gy
             A = A.tolil()
 
-            jj_pin = Ny_i // 2
-            ii_pin = Nx_i // 2
-            pin = jj_pin * Nx_i + ii_pin
+            dirichlet_top = []
+            for ii in range(Nx_i):
+                k = (Ny_i - 1) * Nx_i + ii
+                dirichlet_top.append(k)
+            for k in dirichlet_top:
+                A[k, :] = 0.0
+                A[:, k] = 0.0
+                A[k, k] = 1.0
 
-            A[pin, :] = 0.0
-            A[:, pin] = 0.0
-            A[pin, pin] = 1.0
-
+            self._pois_dirichlet_top = np.array(dirichlet_top, dtype=int)
             self._pois_A = A.tocsc()
             self._pois_lu = splu(self._pois_A)
-            self._pois_pin = pin
 
     def stability_report(self):
         """Return diffusion and pressure stability metrics."""
@@ -601,17 +602,12 @@ class BlowSuctionSolver:
             bc_bottom = (self.rho / self.dt) * (v1 - wall_v[1:-1]) / self.dy
             div_flat[:Nx_i] += bc_bottom
 
-            rhs_flat = div_flat.copy()
-
-            # --- Poisson RHS compatibility enforcement (pure-Neumann) ---
-            rhs_mean = rhs_flat.mean()
-            rhs_flat -= rhs_mean
-
-            # Keep the gauge pin to anchor the nullspace
-            rhs_flat[self._pois_pin] = 0.0
-
-            # Debug: report compatibility after adjustment
-            print(f"[pois] rhs_sum_adj={rhs_flat.sum():.3e} (was mean={rhs_mean:.3e})")
+            rhs_flat = div_flat.astype(float).copy()
+            # Enforce Dirichlet p=0 at top rows by setting RHS to that value (0.0)
+            rhs_flat[self._pois_dirichlet_top] = 0.0
+            print(
+                f"[pois] rhs_sum={rhs_flat.sum():.3e}, rhs_inf={np.max(np.abs(rhs_flat)):.3e}"
+            )
 
             phi_int = self._pois_lu.solve(rhs_flat)
 
@@ -640,11 +636,11 @@ class BlowSuctionSolver:
 
             u_int_new = u_new[1:-1, 1:-1].ravel()
             v_int_new = v_new[1:-1, 1:-1].ravel()
-            rhs_chk = ((self._Du @ u_int_new) + (self._Dv @ v_int_new)).copy()
+            rhs_chk = (self._Du @ u_int_new) + (self._Dv @ v_int_new)
             rhs_chk[:Nx_i] += (
                     self.rho / self.dt * (v_new[1, 1:-1] - wall_v[1:-1]) / self.dy
             )
-            print(f"[chk] sum(rhs_after)= {rhs_chk.sum():.3e}")
+            print(f"[chk] sum(rhs_after)={rhs_chk.sum():.3e}")
 
             # Diagnostics and flux balances
             div_new = rhs_chk
