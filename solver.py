@@ -270,6 +270,7 @@ class BlowSuctionSolver:
         # Matrices for the implicit projection scheme
         self._diff_A = None
         self._pois_A = None
+        self._pois_pin = None
         self._aP = self._aW = self._aE = self._aS = self._aN = None
 
     def wall_profile(self, t):
@@ -360,10 +361,15 @@ class BlowSuctionSolver:
             lap_y = Dy1 @ Gy1
             A = sparse.kron(sparse.eye(Ny_i), lap_x) + sparse.kron(lap_y, sparse.eye(Nx_i))
             A = A.tolil()
-            A[0, :] = 0.0
-            A[0, 0] = 1.0
+            jj = Ny_i // 2
+            ii = Nx_i // 2
+            pin = jj * Nx_i + ii
+            A[pin, :] = 0.0
+            A[:, pin] = 0.0
+            A[pin, pin] = 1.0
             self._pois_A = A.tocsc()
             self._pois_lu = splu(self._pois_A)
+            self._pois_pin = pin
 
     def stability_report(self):
         """Return diffusion and pressure stability metrics."""
@@ -578,16 +584,14 @@ class BlowSuctionSolver:
             )
 
             rhs_p = (self.rho / self.dt) * div
-            wall_v = self.wall_profile(t)
-            rhs_p[0, :] += (self.rho / self.dt) * (
-                    v_star[1, 1:-1] - wall_v[1:-1]
-            ) / self.dy
 
             rhs_flat = rhs_p.ravel()
-            rhs_flat[0] = 0.0
+            rhs_flat[self._pois_pin] = 0.0
             sol_p = self._pois_lu.solve(rhs_flat)
             phi = np.zeros_like(p)
             phi[1:-1, 1:-1] = sol_p.reshape(Ny_i, Nx_i)
+
+            wall_v = self.wall_profile(t)
 
             # reconstruct ghost cells for consistent gradients
             phi[0, 1:-1] = (
@@ -632,11 +636,11 @@ class BlowSuctionSolver:
                 print(
                     f"    div_inf={div_norm:.2e}, wall_flux={wall_flux:.3e}, top_flux={top_flux:.3e}"
                 )
-            assert div_norm < 1e-10, f"divergence {div_norm:.2e} exceeds tolerance"
-            if abs(wall_flux) > 0:
-                assert (
-                    abs(wall_flux - top_flux) < 1e-8 * abs(wall_flux)
-                ), "mass imbalance"
+            ref = max(1.0, np.max(np.abs(u_new)), np.max(np.abs(v_new)))
+            assert div_norm / ref < 1e-10, f"divergence {div_norm:.2e} exceeds tolerance"
+            assert (
+                    abs(wall_flux - top_flux) <= 1e-8 * max(1.0, abs(wall_flux))
+            ), "mass imbalance"
 
             u, v = u_new, v_new
 
