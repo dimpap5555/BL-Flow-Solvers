@@ -89,8 +89,8 @@ def blow_suction_example():
     rho = 1.0
     nu = 1e-3
     x = np.linspace(0.0, 1.0, 100)
-    y = np.linspace(0.0, 1.0, 100)
-    dt = 1e-2
+    y = np.linspace(0.0, 1.0, 1000)
+    dt = 1e-1
     Nt = 100
 
     def wall(t, x):
@@ -98,7 +98,7 @@ def blow_suction_example():
 
     solver = BlowSuctionSolver(rho, nu, x, y, dt, Nt, wall, cp=0.1, verbose=True)
     solver.stability_report()
-    frames_u, frames_v, _, time = solver.run_implicit(theta=0.4)
+    frames_u, frames_v, _, time = solver.run_implicit()
 
     # Post-processing: visualize the evolving velocity field
     _visualize_blow_suction(frames_u, frames_v, x, y, time)
