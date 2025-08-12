@@ -357,9 +357,14 @@ class BlowSuctionSolver:
             Dx1 = -Gx1.T
             Dy1 = -Gy1.T
 
-            lap_x = Dx1 @ Gx1
-            lap_y = Dy1 @ Gy1
-            A = sparse.kron(sparse.eye(Ny_i), lap_x) + sparse.kron(lap_y, sparse.eye(Nx_i))
+            Ix = sparse.eye(Nx_i)
+            Iy = sparse.eye(Ny_i)
+            self._Gx = sparse.kron(Iy, Gx1)
+            self._Gy = sparse.kron(Gy1, Ix)
+            self._Du = sparse.kron(Iy, Dx1)
+            self._Dv = sparse.kron(Dy1, Ix)
+
+            A = self._Du @ self._Gx + self._Dv @ self._Gy
             A = A.tolil()
             jj = Ny_i // 2
             ii = Nx_i // 2
@@ -579,74 +584,36 @@ class BlowSuctionSolver:
             v_star[:, 0] = v_star[:, 1]
             v_star[:, -1] = v_star[:, -2]
 
-            # Build divergence on the interior (Ny_i, Nx_i) using boundary-consistent stencils
-            div = np.zeros((Ny_i, Nx_i))
-
-            # \u2202u/\u2202x
-            # interior columns (centered)
-            div[:, 1:-1] += (u_star[1:-1, 3:-1] - u_star[1:-1, 1:-3]) / (2 * self.dx)
-            # first interior column (forward)
-            div[:, 0] += (u_star[1:-1, 2] - u_star[1:-1, 1]) / self.dx
-            # last interior column (backward)
-            div[:, -1] += (u_star[1:-1, -2] - u_star[1:-1, -3]) / self.dx
-
-            # \u2202v/\u2202y
-            # interior rows (centered)
-            div[1:-1, :] += (v_star[3:-1, 1:-1] - v_star[1:-3, 1:-1]) / (2 * self.dy)
-            # first interior row next to bottom wall (use wall BC: one-sided)
-            div[0, :] += (v_star[1, 1:-1] - wall_v[1:-1]) / self.dy
-            # last interior row near top (Neumann 0 at top: one-sided)
-            div[-1, :] += (v_star[-1, 1:-1] - v_star[-2, 1:-1]) / self.dy
-
-            rhs_p = (self.rho / self.dt) * div
-
-            rhs_flat = rhs_p.ravel()
+            u_int = u_star[1:-1, 1:-1].ravel()
+            v_int = v_star[1:-1, 1:-1].ravel()
+            div_flat = (self._Du @ u_int) + (self._Dv @ v_int)
+            rhs_flat = (self.rho / self.dt) * div_flat
             rhs_flat[self._pois_pin] = 0.0
-            sol_p = self._pois_lu.solve(rhs_flat)
-            phi = np.zeros_like(p)
-            phi[1:-1, 1:-1] = sol_p.reshape(Ny_i, Nx_i)
+            phi_int = self._pois_lu.solve(rhs_flat)
 
-            wall_v = self.wall_profile(t)
-
-            # reconstruct ghost cells for consistent gradients
-            phi[0, 1:-1] = (
-                phi[1, 1:-1]
-                - self.dy * (self.rho / self.dt) * (v_star[1, 1:-1] - wall_v[1:-1])
-            )
-            phi[-1, 1:-1] = phi[-2, 1:-1]
-            phi[:, 0] = phi[:, 1]
-            phi[:, -1] = phi[:, -2]
-
+            gradx_phi = (self._Gx @ phi_int).reshape(Ny_i, Nx_i)
+            grady_phi = (self._Gy @ phi_int).reshape(Ny_i, Nx_i)
             u_new = u_star.copy()
             v_new = v_star.copy()
-            u_new[1:-1, 1:-1] -= (self.dt / self.rho) * (
-                (phi[1:-1, 2:] - phi[1:-1, :-2]) / (2 * self.dx)
-            )
-            v_new[1:-1, 1:-1] -= (self.dt / self.rho) * (
-                (phi[2:, 1:-1] - phi[:-2, 1:-1]) / (2 * self.dy)
-            )
+            u_new[1:-1, 1:-1] -= (self.dt / self.rho) * gradx_phi
+            v_new[1:-1, 1:-1] -= (self.dt / self.rho) * grady_phi
 
             u_new[0, :] = 0.0
             u_new[-1, :] = u_new[-2, :]
             u_new[:, 0] = u_new[:, 1]
             u_new[:, -1] = u_new[:, -2]
+            wall_v = self.wall_profile(t)
             v_new[0, :] = wall_v
             v_new[-1, :] = v_new[-2, :]
             v_new[:, 0] = v_new[:, 1]
             v_new[:, -1] = v_new[:, -2]
 
-            p[1:-1, 1:-1] += phi[1:-1, 1:-1]
-            # remove the null space but leave boundary values untouched
+            p[1:-1, 1:-1] += phi_int.reshape(Ny_i, Nx_i)
             p -= np.mean(p)
 
-            # diagnostics
-            div_new = np.zeros((Ny_i, Nx_i))
-            div_new[:, 1:-1] += (u_new[1:-1, 3:-1] - u_new[1:-1, 1:-3]) / (2 * self.dx)
-            div_new[:, 0] += (u_new[1:-1, 2] - u_new[1:-1, 1]) / self.dx
-            div_new[:, -1] += (u_new[1:-1, -2] - u_new[1:-1, -3]) / self.dx
-            div_new[1:-1, :] += (v_new[3:-1, 1:-1] - v_new[1:-3, 1:-1]) / (2 * self.dy)
-            div_new[0, :] += (v_new[1, 1:-1] - wall_v[1:-1]) / self.dy
-            div_new[-1, :] += (v_new[-1, 1:-1] - v_new[-2, 1:-1]) / self.dy
+            u_int_new = u_new[1:-1, 1:-1].ravel()
+            v_int_new = v_new[1:-1, 1:-1].ravel()
+            div_new = (self._Du @ u_int_new) + (self._Dv @ v_int_new)
             div_norm = np.max(np.abs(div_new))
             wall_flux = np.trapezoid(v_new[0, :], self.x)
             top_flux = np.trapezoid(v_new[-1, :], self.x)
