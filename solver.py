@@ -416,50 +416,53 @@ class BlowSuctionSolver:
     def _assemble_poisson_rhs(self, u_star, v_star, wall_v):
         Nx_i, Ny_i = self._Nx_i, self._Ny_i
         dx, dy = self.dx, self.dy
-        u_int = u_star[1:-1, 1:-1].ravel()
-        v_int = v_star[1:-1, 1:-1].ravel()
-
         div = np.zeros(Nx_i * Ny_i, dtype=float)
 
         def K(j, i):
             return j * Nx_i + i
 
-        # du/dx
+        # du/dx (Neumann-zero at left/right via one-sided interior-only diffs)
         for j in range(Ny_i):
+            jj = j + 1  # interior row index in full grid
             for i in range(Nx_i):
+                ii = i + 1
                 k = K(j, i)
                 if i == 0:
-                    uP = u_star[j + 1, i + 1]
-                    uE = u_star[j + 1, i + 2]
+                    uP = u_star[jj, ii]
+                    uE = u_star[jj, ii + 1]
                     div[k] += (uE - uP) / dx
                 elif i == Nx_i - 1:
-                    uW = u_star[j + 1, i]
-                    uP = u_star[j + 1, i + 1]
+                    uW = u_star[jj, ii - 1]
+                    uP = u_star[jj, ii]
                     div[k] += (uP - uW) / dx
                 else:
-                    uE = u_star[j + 1, i + 2]
-                    uW = u_star[j + 1, i]
+                    uE = u_star[jj, ii + 1]
+                    uW = u_star[jj, ii - 1]
                     div[k] += (uE - uW) / (2 * dx)
 
-        # dv/dy with bottom one-sided using wall_v
+        # dv/dy (IMPORTANT: no wall_v here; use interior-only diffs)
         for j in range(Ny_i):
+            jj = j + 1
             for i in range(Nx_i):
+                ii = i + 1
                 k = K(j, i)
                 if j == 0:
-                    vN = v_star[j + 2, i + 1]
-                    vW = wall_v[i + 1]
-                    div[k] += (vN - vW) / dy
+                    # forward diff using the first two interior rows (jj=1,2)
+                    vP = v_star[jj, ii]
+                    vN = v_star[jj + 1, ii]
+                    div[k] += (vN - vP) / dy
                 elif j == Ny_i - 1:
-                    vS = v_star[j, i + 1]
-                    vP = v_star[j + 1, i + 1]
+                    # backward diff using the last two interior rows
+                    vS = v_star[jj - 1, ii]
+                    vP = v_star[jj, ii]
                     div[k] += (vP - vS) / dy
                 else:
-                    vN = v_star[j + 2, i + 1]
-                    vS = v_star[j, i + 1]
+                    vN = v_star[jj + 1, ii]
+                    vS = v_star[jj - 1, ii]
                     div[k] += (vN - vS) / (2 * dy)
 
-        rhs = (self.rho / self.dt) * div
-        return rhs
+        # Poisson RHS: ∇²φ = (ρ/Δt) ∇·u*
+        return (self.rho / self.dt) * div
 
     def stability_report(self):
         """Return diffusion and pressure stability metrics."""
