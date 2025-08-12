@@ -602,11 +602,16 @@ class BlowSuctionSolver:
             div_flat[:Nx_i] += bc_bottom
 
             rhs_flat = div_flat.copy()
+
+            # --- Poisson RHS compatibility enforcement (pure-Neumann) ---
+            rhs_mean = rhs_flat.mean()
+            rhs_flat -= rhs_mean
+
+            # Keep the gauge pin to anchor the nullspace
             rhs_flat[self._pois_pin] = 0.0
-            compat = rhs_flat.sum()
-            print(
-                f"[pois] rhs_sum={compat:.3e}, rhs_inf={np.max(np.abs(rhs_flat)):.3e}"
-            )
+
+            # Debug: report compatibility after adjustment
+            print(f"[pois] rhs_sum_adj={rhs_flat.sum():.3e} (was mean={rhs_mean:.3e})")
 
             phi_int = self._pois_lu.solve(rhs_flat)
 
@@ -635,13 +640,14 @@ class BlowSuctionSolver:
 
             u_int_new = u_new[1:-1, 1:-1].ravel()
             v_int_new = v_new[1:-1, 1:-1].ravel()
-            div_new = (self._Du @ u_int_new) + (self._Dv @ v_int_new)
-            bc_bottom_new = (
-                self.rho / self.dt * (v_new[1, 1:-1] - wall_v[1:-1]) / self.dy
+            rhs_chk = ((self._Du @ u_int_new) + (self._Dv @ v_int_new)).copy()
+            rhs_chk[:Nx_i] += (
+                    self.rho / self.dt * (v_new[1, 1:-1] - wall_v[1:-1]) / self.dy
             )
-            div_new[:Nx_i] += bc_bottom_new
+            print(f"[chk] sum(rhs_after)= {rhs_chk.sum():.3e}")
 
             # Diagnostics and flux balances
+            div_new = rhs_chk
             div_inf = np.max(np.abs(div_new))
             wall_flux = np.trapezoid(v_new[0, :], self.x)
             top_flux = np.trapezoid(v_new[-1, :], self.x)
