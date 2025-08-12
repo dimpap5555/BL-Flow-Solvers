@@ -89,16 +89,16 @@ def blow_suction_example():
     rho = 1.0
     nu = 1e-3
     x = np.linspace(0.0, 1.0, 100)
-    y = np.linspace(0.0, 0.1, 100)
-    dt = 1e-2
+    y = np.linspace(0.0, 1.0, 100)
+    dt = 1e-1
     Nt = 100
 
     def wall(t, x):
-        return 0.1 * np.ones_like(x)
+        return 1.0 * np.ones_like(x)
 
     solver = BlowSuctionSolver(rho, nu, x, y, dt, Nt, wall, cp=0.1, verbose=True)
     solver.stability_report()
-    frames_u, frames_v, time = solver.run_implicit()
+    frames_u, frames_v, _, time = solver.run_implicit(theta=0.4)
 
     # Post-processing: visualize the evolving velocity field
     _visualize_blow_suction(frames_u, frames_v, x, y, time)
@@ -141,7 +141,49 @@ def _visualize_blow_suction(frames_u, frames_v, x, y, time):
     plt.tight_layout()
     plt.show()
 
+def compare_pressure_methods():
+    """Run explicit and implicit schemes and animate their pressure fields."""
+    rho = 1.0
+    nu = 1e-3
+    x = np.linspace(0.0, 1.0, 100)
+    y = np.linspace(0.0, 0.1, 100)
+    dt = 1e-4
+    Nt = 1000
+
+    def wall(t, x):
+        return 0.1 * np.ones_like(x)
+
+    exp_solver = BlowSuctionSolver(rho, nu, x, y, dt, Nt, wall, cp=0.1)
+    exp_solver.stability_report()
+    _, _, p_exp, time = exp_solver.run_explicit()
+
+    imp_solver = BlowSuctionSolver(rho, nu, x, y, dt, Nt, wall, cp=0.1)
+    _, _, p_imp, _ = imp_solver.run_implicit()
+
+    X, Y = np.meshgrid(x, y)
+    pmin = min(p_exp.min(), p_imp.min())
+    pmax = max(p_exp.max(), p_imp.max())
+    levels = np.linspace(pmin, pmax, 50)
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
+    c1 = ax1.contourf(X, Y, p_exp[0], levels=levels)
+    c2 = ax2.contourf(X, Y, p_imp[0], levels=levels)
+    fig.colorbar(c1, ax=ax1).set_label('pressure')
+    fig.colorbar(c2, ax=ax2).set_label('pressure')
+
+    def animate(k):
+        ax1.clear(); ax2.clear()
+        ax1.contourf(X, Y, p_exp[k], levels=levels)
+        ax2.contourf(X, Y, p_imp[k], levels=levels)
+        ax1.set_xlabel('x [m]'); ax1.set_ylabel('y [m]')
+        ax2.set_xlabel('x [m]'); ax2.set_ylabel('y [m]')
+        ax1.set_title(f'Explicit p at t={time[k]:.3f}s')
+        ax2.set_title(f'Implicit p at t={time[k]:.3f}s')
+
+    ani = FuncAnimation(fig, animate, frames=len(time), interval=100)
+    plt.tight_layout()
+    plt.show()
+
 
 if __name__ == '__main__':
     blow_suction_example()
-    # main()

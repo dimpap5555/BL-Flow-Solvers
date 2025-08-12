@@ -362,12 +362,25 @@ class BlowSuctionSolver:
         return diff_score, press_score, score
 
     def run_explicit(self):
-        """Advance the solution using the explicit projection scheme."""
+        """Advance the solution using the explicit projection scheme.
+
+        Returns
+        -------
+        frames_u : ndarray
+            Time history of the streamwise velocity.
+        frames_v : ndarray
+            Time history of the wall-normal velocity.
+        frames_p : ndarray
+            Time history of the pressure field.
+        time : ndarray
+            Array of time snapshots.
+        """
         u = np.zeros((self.Ny, self.Nx))
         v = np.zeros_like(u)
         p = np.zeros_like(u)
         frames_u = []
         frames_v = []
+        frames_p = []
         if self.verbose:
             self.stability_report()
         for n, t in enumerate(self.time):
@@ -434,10 +447,12 @@ class BlowSuctionSolver:
 
             frames_u.append(u.copy())
             frames_v.append(v.copy())
+            frames_p.append(p.copy())
 
         frames_u = np.array(frames_u)
         frames_v = np.array(frames_v)
-        return frames_u, frames_v, self.time
+        frames_p = np.array(frames_p)
+        return frames_u, frames_v, frames_p, self.time
 
     def run_implicit(self, theta=0.5):
         """Advance the solution using a fully implicit projection scheme.
@@ -448,6 +463,17 @@ class BlowSuctionSolver:
             Crank–Nicolson weighting factor. ``theta=1`` reduces to backward
             Euler. The default ``theta=0.5`` provides second-order accuracy and
             remains unconditionally stable.
+
+        Returns
+        -------
+        frames_u : ndarray
+            Time history of the streamwise velocity.
+        frames_v : ndarray
+            Time history of the wall-normal velocity.
+        frames_p : ndarray
+            Time history of the pressure field.
+        time : ndarray
+            Array of time snapshots.
         """
         self._setup_implicit(theta)
 
@@ -456,6 +482,7 @@ class BlowSuctionSolver:
         p = np.zeros_like(u)
         frames_u = []
         frames_v = []
+        frames_p = []
         inv_dt = 1.0 / self.dt
         Nx_i = self.Nx - 2
         Ny_i = self.Ny - 2
@@ -551,7 +578,9 @@ class BlowSuctionSolver:
 
             frames_u.append(u.copy())
             frames_v.append(v.copy())
+            frames_p.append(p.copy())
 
         frames_u = np.array(frames_u)
         frames_v = np.array(frames_v)
-        return frames_u, frames_v, self.time
+        frames_p = np.array(frames_p)
+        return frames_u, frames_v, frames_p, self.time

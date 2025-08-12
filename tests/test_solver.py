@@ -43,11 +43,12 @@ def test_blowsolver_implicit_zero_wall():
     Nt = 3
 
     solver = BlowSuctionSolver(rho, nu, x, y, dt, Nt, lambda t, x: np.zeros_like(x))
-    frames_u, frames_v, _ = solver.run_implicit()
+    frames_u, frames_v, frames_p, _ = solver.run_implicit()
     assert np.allclose(frames_u, 0.0)
     assert np.allclose(frames_v, 0.0)
+    assert np.allclose(frames_p, 0.0)
 
-def test_blowsolver_zero_wall():
+def test_blowsolver_excplicit_zero_wall():
     rho = 1.0
     nu = 1e-3
     x = np.linspace(0.0, 0.1, 5)
@@ -56,9 +57,10 @@ def test_blowsolver_zero_wall():
     Nt = 3
 
     solver = BlowSuctionSolver(rho, nu, x, y, dt, Nt, lambda t, x: np.zeros_like(x))
-    frames_u, frames_v, _ = solver.run()
+    frames_u, frames_v, frames_p, _ = solver.run_explicit()
     assert np.allclose(frames_u, 0.0)
     assert np.allclose(frames_v, 0.0)
+    assert np.allclose(frames_p, 0.0)
 
 def test_blowsolver_stability_report():
     rho = 1.0
