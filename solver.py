@@ -342,20 +342,28 @@ class BlowSuctionSolver:
             Nx_i = self.Nx - 2
             Ny_i = self.Ny - 2
 
-            def lap_neumann(n, h):
-                main = -2.0 * np.ones(n) / h ** 2
-                off = np.ones(n - 1) / h ** 2
-                L = sparse.diags([off, main, off], [-1, 0, 1], format="lil")
-                L[0, 0] = -1.0 / h ** 2
-                L[0, 1] = 1.0 / h ** 2
-                L[-1, -1] = -1.0 / h ** 2
-                L[-1, -2] = 1.0 / h ** 2
-                return L.tocsr()
+            def grad_mat(n, h):
+                off = np.ones(n - 1) / (2 * h)
+                G = sparse.diags([-off, off], [-1, 1], shape=(n, n), format="lil")
+                G[0, 0] = -1.0 / h
+                G[0, 1] = 1.0 / h
+                G[-1, -2] = -1.0 / h
+                G[-1, -1] = 1.0 / h
+                return G.tocsr()
 
-            Dxx = lap_neumann(Nx_i, self.dx)
-            Dyy = lap_neumann(Ny_i, self.dy)
-            self._pois_A = sparse.kronsum(Dyy, Dxx, format="csr")
-            self._pois_lu = splu(self._pois_A.tocsc())
+            Gx1 = grad_mat(Nx_i, self.dx)
+            Gy1 = grad_mat(Ny_i, self.dy)
+            Dx1 = -Gx1.T
+            Dy1 = -Gy1.T
+
+            lap_x = Dx1 @ Gx1
+            lap_y = Dy1 @ Gy1
+            A = sparse.kron(sparse.eye(Ny_i), lap_x) + sparse.kron(lap_y, sparse.eye(Nx_i))
+            A = A.tolil()
+            A[0, :] = 0.0
+            A[0, 0] = 1.0
+            self._pois_A = A.tocsc()
+            self._pois_lu = splu(self._pois_A)
 
     def stability_report(self):
         """Return diffusion and pressure stability metrics."""
@@ -575,7 +583,9 @@ class BlowSuctionSolver:
                     v_star[1, 1:-1] - wall_v[1:-1]
             ) / self.dy
 
-            sol_p = self._pois_lu.solve(rhs_p.ravel())
+            rhs_flat = rhs_p.ravel()
+            rhs_flat[0] = 0.0
+            sol_p = self._pois_lu.solve(rhs_flat)
             phi = np.zeros_like(p)
             phi[1:-1, 1:-1] = sol_p.reshape(Ny_i, Nx_i)
 
@@ -612,8 +622,8 @@ class BlowSuctionSolver:
 
             # diagnostics
             div_new = (
-                    (u_new[1:-1, 2:] - u_new[1:-1, :-2]) / (2 * self.dx)
-                    + (v_new[2:, 1:-1] - v_new[:-2, 1:-1]) / (2 * self.dy)
+                (u_new[1:-1, 2:] - u_new[1:-1, :-2]) / (2 * self.dx)
+                + (v_new[2:, 1:-1] - v_new[:-2, 1:-1]) / (2 * self.dy)
             )
             div_norm = np.max(np.abs(div_new))
             wall_flux = np.trapezoid(v_new[0, :], self.x)
@@ -625,7 +635,7 @@ class BlowSuctionSolver:
             assert div_norm < 1e-10, f"divergence {div_norm:.2e} exceeds tolerance"
             if abs(wall_flux) > 0:
                 assert (
-                        abs(wall_flux - top_flux) < 1e-8 * abs(wall_flux)
+                    abs(wall_flux - top_flux) < 1e-8 * abs(wall_flux)
                 ), "mass imbalance"
 
             u, v = u_new, v_new
