@@ -359,21 +359,44 @@ class BlowSuctionSolver:
 
             Ix = sparse.eye(Nx_i)
             Iy = sparse.eye(Ny_i)
+
+            # grad in x/y acting on interior scalars
             self._Gx = sparse.kron(Iy, Gx1)
             self._Gy = sparse.kron(Gy1, Ix)
+
+            # div pieces acting on interior velocities
             self._Du = sparse.kron(Iy, Dx1)
             self._Dv = sparse.kron(Dy1, Ix)
 
             A = self._Du @ self._Gx + self._Dv @ self._Gy
             A = A.tolil()
-            jj = Ny_i // 2
-            ii = Nx_i // 2
-            pin = jj * Nx_i + ii
+
+            dirichlet_ids = []
+            for ii in range(Nx_i):
+                dirichlet_ids.append((Ny_i - 1) * Nx_i + ii)  # top row
+            for jj in range(Ny_i):
+                dirichlet_ids.append(jj * Nx_i + 0)  # left column
+                dirichlet_ids.append(jj * Nx_i + (Nx_i - 1))  # right column
+            dirichlet_ids = sorted(set(dirichlet_ids))
+
+            jj_pin = Ny_i // 2
+            ii_pin = Nx_i // 2
+            pin = jj_pin * Nx_i + ii_pin
+            if pin in dirichlet_ids:
+                pin = (Ny_i // 2) * Nx_i + (Nx_i // 2)
+
+            for k in dirichlet_ids:
+                A[k, :] = 0.0
+                A[:, k] = 0.0
+                A[k, k] = 1.0
+
             A[pin, :] = 0.0
             A[:, pin] = 0.0
             A[pin, pin] = 1.0
+
             self._pois_A = A.tocsc()
             self._pois_lu = splu(self._pois_A)
+            self._pois_dirichlet = np.array(dirichlet_ids, dtype=int)
             self._pois_pin = pin
 
     def stability_report(self):
@@ -580,15 +603,19 @@ class BlowSuctionSolver:
             u_star[:, -1] = u_star[:, -2]
             wall_v = self.wall_profile(t)
             v_star[0, :] = wall_v
-            v_star[-1, :] = v_star[-2, :]
             v_star[:, 0] = v_star[:, 1]
             v_star[:, -1] = v_star[:, -2]
 
             u_int = u_star[1:-1, 1:-1].ravel()
             v_int = v_star[1:-1, 1:-1].ravel()
+
             div_flat = (self._Du @ u_int) + (self._Dv @ v_int)
             rhs_flat = (self.rho / self.dt) * div_flat
+
+            if getattr(self, "_pois_dirichlet", None) is not None:
+                rhs_flat[self._pois_dirichlet] = 0.0
             rhs_flat[self._pois_pin] = 0.0
+
             phi_int = self._pois_lu.solve(rhs_flat)
 
             gradx_phi = (self._Gx @ phi_int).reshape(Ny_i, Nx_i)
@@ -604,27 +631,31 @@ class BlowSuctionSolver:
             u_new[:, -1] = u_new[:, -2]
             wall_v = self.wall_profile(t)
             v_new[0, :] = wall_v
-            v_new[-1, :] = v_new[-2, :]
             v_new[:, 0] = v_new[:, 1]
             v_new[:, -1] = v_new[:, -2]
 
             p[1:-1, 1:-1] += phi_int.reshape(Ny_i, Nx_i)
-            p -= np.mean(p)
 
             u_int_new = u_new[1:-1, 1:-1].ravel()
             v_int_new = v_new[1:-1, 1:-1].ravel()
             div_new = (self._Du @ u_int_new) + (self._Dv @ v_int_new)
-            div_norm = np.max(np.abs(div_new))
+            div_inf = np.max(np.abs(div_new))
             wall_flux = np.trapezoid(v_new[0, :], self.x)
             top_flux = np.trapezoid(v_new[-1, :], self.x)
+            left_flux = np.trapezoid(u_new[:, 0], self.y)
+            right_flux = np.trapezoid(u_new[:, -1], self.y)
             if self.verbose:
                 print(
-                    f"    div_inf={div_norm:.2e}, wall_flux={wall_flux:.3e}, top_flux={top_flux:.3e}"
+                    "    div_inf={:.2e}, wall_flux={:.3e}, top_flux={:.3e}, "
+                    "left_flux={:.3e}, right_flux={:.3e}".format(
+                        div_inf, wall_flux, top_flux, left_flux, right_flux
+                    )
                 )
             ref = max(1.0, np.max(np.abs(u_new)), np.max(np.abs(v_new)))
-            assert div_norm / ref < 1e-10, f"divergence {div_norm:.2e} exceeds tolerance"
+            assert div_inf / ref < 1e-10, f"divergence {div_inf:.2e} exceeds tolerance"
+            out_sum = top_flux + left_flux + right_flux
             assert (
-                    abs(wall_flux - top_flux) <= 1e-8 * max(1.0, abs(wall_flux))
+                    abs(wall_flux + out_sum) <= 1e-8 * max(1.0, abs(wall_flux))
             ), "mass imbalance"
 
             u, v = u_new, v_new
