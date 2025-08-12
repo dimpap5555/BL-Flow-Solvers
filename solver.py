@@ -271,7 +271,6 @@ class BlowSuctionSolver:
         self._diff_A = None
         self._pois_A = None
         self._pois_pin = None
-        self._Bwall = None
         self._aP = self._aW = self._aE = self._aS = self._aN = None
 
     def wall_profile(self, t):
@@ -368,15 +367,6 @@ class BlowSuctionSolver:
             # div pieces acting on interior velocities
             self._Du = sparse.kron(Iy, Dx1)
             self._Dv = sparse.kron(Dy1, Ix)
-
-            # precompute bottom-wall injection operator
-            rows, cols, data = [], [], []
-            for i in range(Nx_i):
-                k = i  # first interior row j=0
-                rows.append(k)
-                cols.append(i + 1)  # wall_v index corresponds to physical node i+1
-                data.append(-1.0 / self.dy)
-            self._Bwall = sparse.csr_matrix((data, (rows, cols)), shape=(Nx_i * Ny_i, self.Nx))
 
             A = self._Du @ self._Gx + self._Dv @ self._Gy
             A = A.tolil()
@@ -540,11 +530,13 @@ class BlowSuctionSolver:
         Nx_i = self.Nx - 2
         Ny_i = self.Ny - 2
 
+        print(
+            f"[cfg] Nx={self.Nx}, Ny={self.Ny}, dx={self.dx:.3e}, dy={self.dy:.3e}, dt={self.dt:.3e}, theta=1.0"
+        )
+
         for n, t in enumerate(self.time):
             theta_n = 1.0
             self._setup_implicit(theta_n)
-            if self.verbose and n % 10 == 0:
-                print(f"[blow-imp] step {n}/{self.Nt}")
 
             # Enforce wall boundary for the current time level
             wall_v = self.wall_profile(t)
@@ -585,13 +577,25 @@ class BlowSuctionSolver:
             u_int = u_star[1:-1, 1:-1].ravel()
             v_int = v_star[1:-1, 1:-1].ravel()
 
-            div_flat = (self._Du @ u_int) + (self._Dv @ v_int) + (self._Bwall @ wall_v)
+            div_flat = (self._Du @ u_int) + (self._Dv @ v_int)
+            div_flat *= self.rho / self.dt
+            v1 = v_star[1, 1:-1]
+            bc_bottom = (self.rho / self.dt) * (v1 - wall_v[1:-1]) / self.dy
+            div_flat[:Nx_i] += bc_bottom
 
-            rhs_flat = (self.rho / self.dt) * div_flat
-
+            rhs_flat = div_flat.copy()
             rhs_flat[self._pois_pin] = 0.0
+            compat = rhs_flat.sum()
+            print(
+                f"[pois] rhs_sum={compat:.3e}, rhs_inf={np.max(np.abs(rhs_flat)):.3e}"
+            )
 
             phi_int = self._pois_lu.solve(rhs_flat)
+
+            r = self._pois_A @ phi_int - rhs_flat
+            print(
+                f"[pois] res_inf={np.max(np.abs(r)):.3e}, res_L2={np.linalg.norm(r):.3e}"
+            )
 
             gradx_phi = (self._Gx @ phi_int).reshape(Ny_i, Nx_i)
             grady_phi = (self._Gy @ phi_int).reshape(Ny_i, Nx_i)
@@ -608,24 +612,25 @@ class BlowSuctionSolver:
 
             u_int_new = u_new[1:-1, 1:-1].ravel()
             v_int_new = v_new[1:-1, 1:-1].ravel()
-            div_new = (self._Du @ u_int_new) + (self._Dv @ v_int_new) + (self._Bwall @ wall_v)
+            div_new = (self._Du @ u_int_new) + (self._Dv @ v_int_new)
+            bc_bottom_new = (
+                    self.rho / self.dt * (v_new[1, 1:-1] - wall_v[1:-1]) / self.dy
+            )
+            div_new[:Nx_i] += bc_bottom_new
 
             div_inf = np.max(np.abs(div_new))
             wall_flux = np.trapezoid(v_new[0, :], self.x)
             top_flux = np.trapezoid(v_new[-1, :], self.x)
             left_flux = np.trapezoid(u_new[:, 0], self.y)
             right_flux = np.trapezoid(u_new[:, -1], self.y)
-            if self.verbose:
-                print(
-                    "    div_inf={:.2e}, wall_flux={:.3e}, top_flux={:.3e}, "
-                    "left_flux={:.3e}, right_flux={:.3e}".format(
-                        div_inf, wall_flux, top_flux, left_flux, right_flux
-                    )
-                )
+            out_sum = top_flux + left_flux + right_flux
+            print(
+                f"[step {n}] div_inf={div_inf:.3e}, wall_flux={wall_flux:.3e}, "
+                f"out_sum={out_sum:.3e}, mass_err={(wall_flux + out_sum):.3e}"
+            )
             ref = max(1.0, np.max(np.abs(u_new)), np.max(np.abs(v_new)))
             tol_div = 1e-8 if n == 0 else 1e-10
             assert div_inf / ref < tol_div, f"divergence {div_inf:.2e} exceeds tolerance"
-            out_sum = top_flux + left_flux + right_flux
             assert (
                     abs(wall_flux + out_sum) <= 1e-8 * max(1.0, abs(wall_flux))
             ), "mass imbalance"
