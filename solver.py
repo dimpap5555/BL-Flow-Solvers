@@ -310,26 +310,37 @@ class BlowSuctionSolver:
         N = Nx_i * Ny_i
         return sparse.csr_matrix((data, (rows, cols)), shape=(N, N))
 
-    def _setup_implicit(self):
-        """Precompute matrices for the implicit solver."""
-        if self._diff_A is not None:
+    def _setup_implicit(self, theta):
+        """Precompute matrices for the implicit solver.
+
+        Parameters
+        ----------
+        theta : float
+            Crank–Nicolson weighting factor. ``theta=1`` gives backward Euler
+            while ``theta=0.5`` corresponds to the unconditionally stable
+            Crank–Nicolson scheme.
+        """
+        if self._diff_A is not None and getattr(self, "_theta", None) == theta:
             return
 
         inv_dt = 1.0 / self.dt
-        aP = inv_dt + 2 * self.nu / self.dx ** 2 + 2 * self.nu / self.dy ** 2
-        aW = -self.nu / self.dx ** 2
-        aE = -self.nu / self.dx ** 2
-        aS = -self.nu / self.dy ** 2
-        aN = -self.nu / self.dy ** 2
+        aP = inv_dt + 2 * theta * self.nu / self.dx ** 2 + 2 * theta * self.nu / self.dy ** 2
+        aW = -theta * self.nu / self.dx ** 2
+        aE = -theta * self.nu / self.dx ** 2
+        aS = -theta * self.nu / self.dy ** 2
+        aN = -theta * self.nu / self.dy ** 2
         self._aP, self._aW, self._aE, self._aS, self._aN = aP, aW, aE, aS, aN
         self._diff_A = self._build_matrix(aP, aW, aE, aS, aN)
 
-        ap = -2 * (1 / self.dx ** 2 + 1 / self.dy ** 2)
-        aw = 1 / self.dx ** 2
-        ae = 1 / self.dx ** 2
-        a_s = 1 / self.dy ** 2
-        a_n = 1 / self.dy ** 2
-        self._pois_A = self._build_matrix(ap, aw, ae, a_s, a_n)
+        if self._pois_A is None:
+            ap = -2 * (1 / self.dx ** 2 + 1 / self.dy ** 2)
+            aw = 1 / self.dx ** 2
+            ae = 1 / self.dx ** 2
+            a_s = 1 / self.dy ** 2
+            a_n = 1 / self.dy ** 2
+            self._pois_A = self._build_matrix(ap, aw, ae, a_s, a_n)
+
+        self._theta = theta
 
     def stability_report(self):
         """Return diffusion and pressure stability metrics."""
@@ -428,9 +439,17 @@ class BlowSuctionSolver:
         frames_v = np.array(frames_v)
         return frames_u, frames_v, self.time
 
-    def run_implicit(self):
-        """Advance the solution using a fully implicit projection scheme."""
-        self._setup_implicit()
+    def run_implicit(self, theta=0.5):
+        """Advance the solution using a fully implicit projection scheme.
+
+        Parameters
+        ----------
+        theta : float, optional
+            Crank–Nicolson weighting factor. ``theta=1`` reduces to backward
+            Euler. The default ``theta=0.5`` provides second-order accuracy and
+            remains unconditionally stable.
+        """
+        self._setup_implicit(theta)
 
         u = np.zeros((self.Ny, self.Nx))
         v = np.zeros_like(u)
@@ -445,15 +464,28 @@ class BlowSuctionSolver:
             if self.verbose and n % 10 == 0:
                 print(f"[blow-imp] step {n}/{self.Nt}")
 
+            # Enforce wall boundary for the current time level
             v[0, :] = self.wall_profile(t)
+
+            # Laplacians of the previous step (for CN explicit part)
+            lap_u = np.zeros_like(u)
+            lap_v = np.zeros_like(v)
+            lap_u[1:-1, 1:-1] = (
+                (u[1:-1, 2:] - 2 * u[1:-1, 1:-1] + u[1:-1, :-2]) / self.dx ** 2
+                + (u[2:, 1:-1] - 2 * u[1:-1, 1:-1] + u[:-2, 1:-1]) / self.dy ** 2
+            )
+            lap_v[1:-1, 1:-1] = (
+                (v[1:-1, 2:] - 2 * v[1:-1, 1:-1] + v[1:-1, :-2]) / self.dx ** 2
+                + (v[2:, 1:-1] - 2 * v[1:-1, 1:-1] + v[:-2, 1:-1]) / self.dy ** 2
+            )
 
             dpdx = np.zeros_like(u)
             dpdx[:, 1:-1] = (p[:, 2:] - p[:, :-2]) / (2 * self.dx)
             dpdy = np.zeros_like(v)
             dpdy[1:-1, :] = (p[2:, :] - p[:-2, :]) / (2 * self.dy)
 
-            rhs_u = inv_dt * u - (1 / self.rho) * dpdx
-            rhs_v = inv_dt * v - (1 / self.rho) * dpdy
+            rhs_u = inv_dt * u + (1 - theta) * self.nu * lap_u - (1 / self.rho) * dpdx
+            rhs_v = inv_dt * v + (1 - theta) * self.nu * lap_v - (1 / self.rho) * dpdy
 
             b_u = rhs_u[1:-1, 1:-1].copy()
             b_u[:, 0] -= self._aW * u[1:-1, 0]
@@ -486,8 +518,8 @@ class BlowSuctionSolver:
             v_star[:, -1] = v_star[:, -2]
 
             div = (
-                    (u_star[1:-1, 2:] - u_star[1:-1, :-2]) / (2 * self.dx)
-                    + (v_star[2:, 1:-1] - v_star[:-2, 1:-1]) / (2 * self.dy)
+                (u_star[1:-1, 2:] - u_star[1:-1, :-2]) / (2 * self.dx)
+                + (v_star[2:, 1:-1] - v_star[:-2, 1:-1]) / (2 * self.dy)
             )
 
             rhs_p = (self.rho / self.dt) * div
@@ -498,10 +530,10 @@ class BlowSuctionSolver:
             u_new = u_star.copy()
             v_new = v_star.copy()
             u_new[1:-1, 1:-1] -= (self.dt / self.rho) * (
-                    (phi[1:-1, 2:] - phi[1:-1, :-2]) / (2 * self.dx)
+                (phi[1:-1, 2:] - phi[1:-1, :-2]) / (2 * self.dx)
             )
             v_new[1:-1, 1:-1] -= (self.dt / self.rho) * (
-                    (phi[2:, 1:-1] - phi[:-2, 1:-1]) / (2 * self.dy)
+                (phi[2:, 1:-1] - phi[:-2, 1:-1]) / (2 * self.dy)
             )
 
             u_new[0, :] = 0.0

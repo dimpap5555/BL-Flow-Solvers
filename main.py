@@ -89,14 +89,14 @@ def blow_suction_example():
     rho = 1.0
     nu = 1e-3
     x = np.linspace(0.0, 1.0, 100)
-    y = np.linspace(0.0, 0.05, 100)
+    y = np.linspace(0.0, 0.1, 100)
     dt = 1e-2
     Nt = 100
 
     def wall(t, x):
-        return 0.1 * np.sin(10 * np.pi * t + 2 * np.pi * 10 * x) * np.ones_like(x)
+        return 0.1 * np.ones_like(x)
 
-    solver = BlowSuctionSolver(rho, nu, x, y, dt, Nt, wall, cp=1.0, verbose=True)
+    solver = BlowSuctionSolver(rho, nu, x, y, dt, Nt, wall, cp=0.1, verbose=True)
     solver.stability_report()
     frames_u, frames_v, time = solver.run_implicit()
 
