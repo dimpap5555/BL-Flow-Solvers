@@ -90,7 +90,7 @@ def blow_suction_example():
     nu = 1e-3
     x = np.linspace(0.0, 1.0, 100)
     y = np.linspace(0.0, 1.0, 100)
-    dt = 1e-1
+    dt = 1e-2
     Nt = 100
 
     def wall(t, x):

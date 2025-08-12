@@ -429,6 +429,12 @@ class BlowSuctionSolver:
 
             # Step 3: explicit pressure correction
             p[1:-1, 1:-1] -= self.rho * self.cp * self.dt * div
+            # enforce a zero-mean gauge and Neumann boundaries for pressure
+            p -= np.mean(p)
+            p[0, :] = p[1, :]
+            p[-1, :] = p[-2, :]
+            p[:, 0] = p[:, 1]
+            p[:, -1] = p[:, -2]
 
             # Step 4: velocity projection
             dpdx_new = (p[1:-1, 2:] - p[1:-1, :-2]) / (2 * self.dx)
@@ -573,6 +579,11 @@ class BlowSuctionSolver:
             v_new[:, -1] = v_new[:, -2]
 
             p[1:-1, 1:-1] += phi[1:-1, 1:-1]
+            p -= np.mean(p)
+            p[0, :] = p[1, :]
+            p[-1, :] = p[-2, :]
+            p[:, 0] = p[:, 1]
+            p[:, -1] = p[:, -2]
 
             u, v = u_new, v_new
 
