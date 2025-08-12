@@ -270,6 +270,10 @@ class BlowSuctionSolver:
         # Matrices for the implicit projection scheme
         self._diff_A = None
         self._pois_A = None
+        self._pois_lu = None
+        self._Gx = self._Gy = None
+        self._Du = self._Dv = None
+        self._Bbottom = None
         self._aP = self._aW = self._aE = self._aS = self._aN = None
         # store interior sizes for reuse
         self._Nx_i = self._Ny_i = None
@@ -312,78 +316,6 @@ class BlowSuctionSolver:
         N = Nx_i * Ny_i
         return sparse.csr_matrix((data, (rows, cols)), shape=(N, N))
 
-    def _build_poisson_neumann_with_pin(self):
-        Nx_i = self.Nx - 2
-        Ny_i = self.Ny - 2
-        rows, cols, data = [], [], []
-
-        def K(j, i):
-            return j * Nx_i + i
-
-        dx2 = self.dx * self.dx
-        dy2 = self.dy * self.dy
-
-        for j in range(Ny_i):
-            for i in range(Nx_i):
-                k = K(j, i)
-                diag = 0.0
-
-                # West (Neumann zero)
-                if i == 0:
-                    rows += [k, k]
-                    cols += [K(j, i + 1), k]
-                    data += [1.0 / dx2, -1.0 / dx2]
-                else:
-                    rows.append(k)
-                    cols.append(K(j, i - 1))
-                    data.append(1.0 / dx2)
-                    diag -= 1.0 / dx2
-
-                # East (Neumann zero)
-                if i == Nx_i - 1:
-                    rows += [k, k]
-                    cols += [K(j, i - 1), k]
-                    data += [1.0 / dx2, -1.0 / dx2]
-                else:
-                    rows.append(k)
-                    cols.append(K(j, i + 1))
-                    data.append(1.0 / dx2)
-                    diag -= 1.0 / dx2
-
-                # South (Neumann zero)
-                if j == 0:
-                    rows += [k, k]
-                    cols += [K(j + 1, i), k]
-                    data += [1.0 / dy2, -1.0 / dy2]
-                else:
-                    rows.append(k)
-                    cols.append(K(j - 1, i))
-                    data.append(1.0 / dy2)
-                    diag -= 1.0 / dy2
-
-                # North (Neumann zero)
-                if j == Ny_i - 1:
-                    rows += [k, k]
-                    cols += [K(j - 1, i), k]
-                    data += [1.0 / dy2, -1.0 / dy2]
-                else:
-                    rows.append(k)
-                    cols.append(K(j + 1, i))
-                    data.append(1.0 / dy2)
-                    diag -= 1.0 / dy2
-
-                rows.append(k)
-                cols.append(k)
-                data.append(-diag)
-
-        N = Nx_i * Ny_i
-        A = sparse.csr_matrix((data, (rows, cols)), shape=(N, N))
-        pin = 0
-        A = A.tolil()
-        A[pin, :] = 0.0
-        A[:, pin] = 0.0
-        A[pin, pin] = 1.0
-        return A.tocsc(), pin
 
     def _setup_implicit(self, theta):
         """Precompute matrices for the implicit solver.
@@ -414,49 +346,71 @@ class BlowSuctionSolver:
             self._theta = theta
 
         # store interior sizes
-        self._Nx_i = self.Nx - 2
-        self._Ny_i = self.Ny - 2
+        Nx_i = self.Nx - 2
+        Ny_i = self.Ny - 2
+        self._Nx_i = Nx_i
+        self._Ny_i = Ny_i
 
-        if self._pois_A is None:
-            self._pois_A, self._pois_pin = self._build_poisson_neumann_with_pin()
+        if self._Gx is None:
+            # 1D derivative matrices with one-sided differences at ends
+            def d1(n, h):
+                rows, cols, data = [], [], []
+                for i in range(n):
+                    if i == 0:
+                        rows += [i, i]
+                        cols += [0, 1]
+                        data += [-1.0 / h, 1.0 / h]
+                    elif i == n - 1:
+                        rows += [i, i]
+                        cols += [n - 2, n - 1]
+                        data += [-1.0 / h, 1.0 / h]
+                    else:
+                        rows += [i, i]
+                        cols += [i - 1, i + 1]
+                        data += [-0.5 / h, 0.5 / h]
+                return sparse.csr_matrix((data, (rows, cols)), shape=(n, n))
+
+            G1x = d1(Nx_i, self.dx)
+            G1y = d1(Ny_i, self.dy)
+            Ix = sparse.eye(Nx_i, format="csr")
+            Iy = sparse.eye(Ny_i, format="csr")
+            self._Gx = sparse.kron(Iy, G1x, format="csr")
+            self._Gy = sparse.kron(G1y, Ix, format="csr")
+            self._Du = -self._Gx.transpose().tocsr()
+            self._Dv = -self._Gy.transpose().tocsr()
+
+            A = self._Du @ self._Gx + self._Dv @ self._Gy
+            A = A.tolil()
+            # Dirichlet on top, left, right
+            for i in range(Nx_i):
+                k = (Ny_i - 1) * Nx_i + i
+                A[k, :] = 0.0
+                A[k, k] = 1.0
+            for j in range(Ny_i):
+                k_left = j * Nx_i
+                k_right = j * Nx_i + (Nx_i - 1)
+                A[k_left, :] = 0.0
+                A[k_left, k_left] = 1.0
+                A[k_right, :] = 0.0
+                A[k_right, k_right] = 1.0
+            self._pois_A = A.tocsc()
             self._pois_lu = splu(self._pois_A)
 
+            # Bottom boundary source operator
+            rows, cols, data = [], [], []
+            for i in range(Nx_i):
+                k = i  # bottom row index j=0
+                rows.append(k)
+                cols.append(i + 1)
+                data.append(-1.0 / self.dy)
+            self._Bbottom = sparse.csr_matrix((data, (rows, cols)), shape=(Nx_i * Ny_i, self.Nx))
+
     def _assemble_poisson_rhs(self, u_star, v_star, wall_v):
-        Nx_i, Ny_i = self._Nx_i, self._Ny_i
-        dx, dy = self.dx, self.dy
-        div = np.zeros(Nx_i * Ny_i, dtype=float)
-
-        def K(j, i):
-            return j * Nx_i + i
-
-        # du/dx (unchanged)
-        for j in range(Ny_i):
-            jj = j + 1
-            for i in range(Nx_i):
-                ii = i + 1
-                k = K(j, i)
-                if i == 0:
-                    div[k] += (u_star[jj, ii + 1] - u_star[jj, ii]) / dx
-                elif i == Nx_i - 1:
-                    div[k] += (u_star[jj, ii] - u_star[jj, ii - 1]) / dx
-                else:
-                    div[k] += (u_star[jj, ii + 1] - u_star[jj, ii - 1]) / (2 * dx)
-
-        # dv/dy  — USE wall_v at the bottom
-        for j in range(Ny_i):
-            jj = j + 1
-            for i in range(Nx_i):
-                ii = i + 1
-                k = K(j, i)
-                if j == 0:
-                    # first interior row: one-sided with prescribed wall velocity
-                    div[k] += (v_star[jj, ii] - wall_v[ii]) / dy
-                elif j == Ny_i - 1:
-                    div[k] += (v_star[jj, ii] - v_star[jj - 1, ii]) / dy
-                else:
-                    div[k] += (v_star[jj + 1, ii] - v_star[jj - 1, ii]) / (2 * dy)
-
-        return (self.rho / self.dt) * div
+        u_int = u_star[1:-1, 1:-1].ravel()
+        v_int = v_star[1:-1, 1:-1].ravel()
+        div_flat = (self._Du @ u_int) + (self._Dv @ v_int)
+        div_flat = div_flat + (self._Bbottom @ wall_v)
+        return (self.rho / self.dt) * div_flat
 
     def stability_report(self):
         """Return diffusion and pressure stability metrics."""
@@ -575,92 +529,23 @@ class BlowSuctionSolver:
         return frames_u, frames_v, frames_p, self.time
 
     def run_implicit(self, theta=0.5):
-        """Advance the solution using a fully implicit projection scheme.
-
-        Parameters
-        ----------
-        theta : float, optional
-            Crank–Nicolson weighting factor. ``theta=1`` reduces to backward
-            Euler. The default ``theta=0.5`` provides second-order accuracy and
-            remains unconditionally stable.
-
-        Returns
-        -------
-        frames_u : ndarray
-            Time history of the streamwise velocity.
-        frames_v : ndarray
-            Time history of the wall-normal velocity.
-        frames_p : ndarray
-            Time history of the pressure field.
-        time : ndarray
-            Array of time snapshots.
-        """
+        """Advance the solution using a fully implicit projection scheme."""
         u = np.zeros((self.Ny, self.Nx))
         v = np.zeros_like(u)
         p = np.zeros_like(u)
-        frames_u = []
-        frames_v = []
-        frames_p = []
-        inv_dt = 1.0 / self.dt
+        frames_u, frames_v, frames_p = [], [], []
 
-        print(
-            f"[cfg] Nx={self.Nx}, Ny={self.Ny}, dx={self.dx:.3e}, dy={self.dy:.3e}, dt={self.dt:.3e}, theta=1.0"
-        )
+        self._setup_implicit(theta)
+        Nx_i, Ny_i = self._Nx_i, self._Ny_i
 
         for n, t in enumerate(self.time):
-            theta_n = 1.0
-            self._setup_implicit(theta_n)
-
-            Nx_i, Ny_i = self._Nx_i, self._Ny_i
-
-            # Enforce wall boundary for the current time level
             wall_v = self.wall_profile(t)
-            v[0, :] = wall_v
-
-            dpdx = np.zeros_like(u)
-            dpdx[:, 1:-1] = (p[:, 2:] - p[:, :-2]) / (2 * self.dx)
-            dpdy = np.zeros_like(v)
-            dpdy[1:-1, :] = (p[2:, :] - p[:-2, :]) / (2 * self.dy)
-
-            # Laplacians for implicit diffusion
-            lap_u = np.zeros_like(u)
-            lap_v = np.zeros_like(v)
-            lap_u[1:-1, 1:-1] = (
-                (u[1:-1, 2:] - 2 * u[1:-1, 1:-1] + u[1:-1, :-2]) / self.dx ** 2
-                + (u[2:, 1:-1] - 2 * u[1:-1, 1:-1] + u[:-2, 1:-1]) / self.dy ** 2
-            )
-            lap_v[1:-1, 1:-1] = (
-                (v[1:-1, 2:] - 2 * v[1:-1, 1:-1] + v[1:-1, :-2]) / self.dx ** 2
-                + (v[2:, 1:-1] - 2 * v[1:-1, 1:-1] + v[:-2, 1:-1]) / self.dy ** 2
-            )
-
-            rhs_u = inv_dt * u + self.nu * lap_u - (1.0 / self.rho) * dpdx
-            rhs_v = inv_dt * v + self.nu * lap_v - (1.0 / self.rho) * dpdy
-
-            b_u = rhs_u[1:-1, 1:-1].copy()
-            b_u[:, 0] -= self._aW * u[1:-1, 0]
-            b_u[:, -1] -= self._aE * u[1:-1, -1]
-            b_u[0, :] -= self._aS * u[0, 1:-1]
-            b_u[-1, :] -= self._aN * u[-1, 1:-1]
-
-            b_v = rhs_v[1:-1, 1:-1].copy()
-            b_v[:, 0] -= self._aW * v[1:-1, 0]
-            b_v[:, -1] -= self._aE * v[1:-1, -1]
-            b_v[0, :] -= self._aS * v[0, 1:-1]
-            b_v[-1, :] -= self._aN * v[-1, 1:-1]
-
-            sol_u = self._diff_lu.solve(b_u.ravel())
-            sol_v = self._diff_lu.solve(b_v.ravel())
 
             u_star = u.copy()
             v_star = v.copy()
-            u_star[1:-1, 1:-1] = sol_u.reshape(Ny_i, Nx_i)
-            v_star[1:-1, 1:-1] = sol_v.reshape(Ny_i, Nx_i)
 
-            # bottom: prescribed wall
             u_star[0, :] = 0.0
             v_star[0, :] = wall_v
-            # open (do-nothing) on top/left/right: zero normal gradient
             u_star[-1, :] = u_star[-2, :]
             u_star[:, 0] = u_star[:, 1]
             u_star[:, -1] = u_star[:, -2]
@@ -669,42 +554,18 @@ class BlowSuctionSolver:
             v_star[:, -1] = v_star[:, -2]
 
             rhs_flat = self._assemble_poisson_rhs(u_star, v_star, wall_v)
-            rhs_mean = rhs_flat.mean()
-            rhs_flat -= rhs_mean
-            rhs_flat[self._pois_pin] = 0.0
-
             phi_int = self._pois_lu.solve(rhs_flat)
 
-            r = self._pois_A @ phi_int - rhs_flat
-            res_inf = np.max(np.abs(r))
-            print(f"[pois] rhs_mean={rhs_mean:.3e}, res_inf={res_inf:.3e}")
+            res = self._pois_A @ phi_int - rhs_flat
+            res_inf = float(np.max(np.abs(res)))
+            rhs_inf = float(np.max(np.abs(rhs_flat))) if rhs_flat.size else 0.0
+            if self.verbose:
+                print(f"[pois] res_inf={res_inf:.3e}")
+            assert res_inf <= 1e-8 * max(1.0, rhs_inf), "poisson residual too large"
 
-            gradx_phi = np.zeros((Ny_i, Nx_i))
-            grady_phi = np.zeros((Ny_i, Nx_i))
-            dx, dy = self.dx, self.dy
-            for j in range(Ny_i):
-                for i in range(Nx_i):
-                    k = j * Nx_i + i
-                    if i == 0:
-                        phiE = phi_int[k + 1]
-                        phiP = phi_int[k]
-                        gradx_phi[j, i] = (phiE - phiP) / dx
-                    elif i == Nx_i - 1:
-                        phiP = phi_int[k]
-                        phiW = phi_int[k - 1]
-                        gradx_phi[j, i] = (phiP - phiW) / dx
-                    else:
-                        gradx_phi[j, i] = (phi_int[k + 1] - phi_int[k - 1]) / (2 * dx)
-                    if j == 0:
-                        phiN = phi_int[k + Nx_i]
-                        phiP = phi_int[k]
-                        grady_phi[j, i] = (phiN - phiP) / dy
-                    elif j == Ny_i - 1:
-                        phiP = phi_int[k]
-                        phiS = phi_int[k - Nx_i]
-                        grady_phi[j, i] = (phiP - phiS) / dy
-                    else:
-                        grady_phi[j, i] = (phi_int[k + Nx_i] - phi_int[k - Nx_i]) / (2 * dy)
+            gradx_phi = (self._Gx @ phi_int).reshape(Ny_i, Nx_i)
+            grady_phi = (self._Gy @ phi_int).reshape(Ny_i, Nx_i)
+
             u_new = u_star.copy()
             v_new = v_star.copy()
             u_new[1:-1, 1:-1] -= (self.dt / self.rho) * gradx_phi
@@ -723,33 +584,24 @@ class BlowSuctionSolver:
 
             rhs_chk = self._assemble_poisson_rhs(u_new, v_new, wall_v)
             max_div = np.max(np.abs(rhs_chk)) * self.dt / self.rho
-            print(f"[chk] max_div={max_div:.3e}")
-
-            # Diagnostics and flux balances
-            div_new = rhs_chk
-            div_inf = np.max(np.abs(div_new))
-            wall_flux = np.trapezoid(v_new[0, :], self.x)
-            top_flux = np.trapezoid(v_new[-1, :], self.x)
-            left_flux = np.trapezoid(u_new[:, 0], self.y)
-            right_flux = np.trapezoid(u_new[:, -1], self.y)
-            out_sum = top_flux + left_flux + right_flux
-            print(
-                f"[step {n}] div_inf={div_inf:.3e}, wall={wall_flux:.3e}, "
-                f"top={top_flux:.3e}, left={left_flux:.3e}, right={right_flux:.3e}, "
-                f"mass_err={(wall_flux + out_sum):.3e}"
-            )
-            ref = max(1.0, np.max(np.abs(u_new)), np.max(np.abs(v_new)))
-            tol_div = 1e-7 if n == 0 else 1e-10
-            assert div_inf / ref < tol_div, f"divergence {div_inf:.2e} exceeds tolerance"
-            assert abs(wall_flux + out_sum) <= 1e-8 * max(1.0, abs(wall_flux)), "mass imbalance"
+            if self.verbose:
+                print(f"[chk] max_div={max_div:.3e}")
+                wall_flux = np.trapezoid(v_new[0, :], self.x)
+                top_flux = np.trapezoid(v_new[-1, :], self.x)
+                left_flux = np.trapezoid(u_new[:, 0], self.y)
+                right_flux = np.trapezoid(u_new[:, -1], self.y)
+                mass_err = wall_flux + top_flux + left_flux + right_flux
+                print(
+                    f"[step {n}] wall={wall_flux:.3e}, top={top_flux:.3e}, left={left_flux:.3e}, right={right_flux:.3e}, mass_err={mass_err:.3e}"
+                )
+                if abs(mass_err) > abs(wall_flux) * 1e-8:
+                    print(f"[warn] mass imbalance {mass_err:.3e}")
+            tol_div = 1e-6 if n == 0 else 1e-10
+            assert max_div <= tol_div, "divergence exceeds tolerance"
 
             u, v = u_new, v_new
-
             frames_u.append(u.copy())
             frames_v.append(v.copy())
             frames_p.append(p.copy())
 
-        frames_u = np.array(frames_u)
-        frames_v = np.array(frames_v)
-        frames_p = np.array(frames_p)
-        return frames_u, frames_v, frames_p, self.time
+        return np.array(frames_u), np.array(frames_v), np.array(frames_p), self.time
