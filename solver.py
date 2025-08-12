@@ -271,6 +271,7 @@ class BlowSuctionSolver:
         self._diff_A = None
         self._pois_A = None
         self._pois_pin = None
+        self._Bwall = None
         self._aP = self._aW = self._aE = self._aS = self._aN = None
 
     def wall_profile(self, t):
@@ -368,27 +369,21 @@ class BlowSuctionSolver:
             self._Du = sparse.kron(Iy, Dx1)
             self._Dv = sparse.kron(Dy1, Ix)
 
+            # precompute bottom-wall injection operator
+            rows, cols, data = [], [], []
+            for i in range(Nx_i):
+                k = i  # first interior row j=0
+                rows.append(k)
+                cols.append(i + 1)  # wall_v index corresponds to physical node i+1
+                data.append(-1.0 / self.dy)
+            self._Bwall = sparse.csr_matrix((data, (rows, cols)), shape=(Nx_i * Ny_i, self.Nx))
+
             A = self._Du @ self._Gx + self._Dv @ self._Gy
             A = A.tolil()
-
-            dirichlet_ids = []
-            for ii in range(Nx_i):
-                dirichlet_ids.append((Ny_i - 1) * Nx_i + ii)  # top row
-            for jj in range(Ny_i):
-                dirichlet_ids.append(jj * Nx_i + 0)  # left column
-                dirichlet_ids.append(jj * Nx_i + (Nx_i - 1))  # right column
-            dirichlet_ids = sorted(set(dirichlet_ids))
 
             jj_pin = Ny_i // 2
             ii_pin = Nx_i // 2
             pin = jj_pin * Nx_i + ii_pin
-            if pin in dirichlet_ids:
-                pin = (Ny_i // 2) * Nx_i + (Nx_i // 2)
-
-            for k in dirichlet_ids:
-                A[k, :] = 0.0
-                A[:, k] = 0.0
-                A[k, k] = 1.0
 
             A[pin, :] = 0.0
             A[:, pin] = 0.0
@@ -396,7 +391,6 @@ class BlowSuctionSolver:
 
             self._pois_A = A.tocsc()
             self._pois_lu = splu(self._pois_A)
-            self._pois_dirichlet = np.array(dirichlet_ids, dtype=int)
             self._pois_pin = pin
 
     def stability_report(self):
@@ -610,24 +604,14 @@ class BlowSuctionSolver:
             v_int = v_star[1:-1, 1:-1].ravel()
 
             div_flat = (self._Du @ u_int) + (self._Dv @ v_int)
-            # Add boundary divergence from prescribed bottom blowing v(0,x)=wall_v
-            Nx_i = self.Nx - 2
-            Ny_i = self.Ny - 2
-            wall_v = self.wall_profile(t)  # shape: (Nx,)
 
-            # Dy1's first row corresponds to (v_1 - v_wall)/dy. Since v_wall is not in v_int,
-            # we must add the source term -v_wall/dy to div at the first interior row (j=0).
-            b = np.zeros_like(div_flat)
-            # Map interior i=0..Nx_i-1 to physical x-index i+1
-            for i in range(Nx_i):
-                k = 0 * Nx_i + i  # (j=0, i)
-                b[k] += -(wall_v[i + 1]) / self.dy
+            # Add bottom boundary source from prescribed v_wall at y=0
+            wall_v = self.wall_profile(t)
+            div_flat = div_flat + (self._Bwall @ wall_v)
 
-            div_flat += b
             rhs_flat = (self.rho / self.dt) * div_flat
 
-            if getattr(self, "_pois_dirichlet", None) is not None:
-                rhs_flat[self._pois_dirichlet] = 0.0
+            # Only zero the gauge pin row in the RHS
             rhs_flat[self._pois_pin] = 0.0
 
             phi_int = self._pois_lu.solve(rhs_flat)
@@ -640,13 +624,9 @@ class BlowSuctionSolver:
             v_new[1:-1, 1:-1] -= (self.dt / self.rho) * grady_phi
 
             u_new[0, :] = 0.0
-            u_new[-1, :] = u_new[-2, :]
-            u_new[:, 0] = u_new[:, 1]
-            u_new[:, -1] = u_new[:, -2]
             wall_v = self.wall_profile(t)
             v_new[0, :] = wall_v
-            v_new[:, 0] = v_new[:, 1]
-            v_new[:, -1] = v_new[:, -2]
+            # leave top/left/right normals unconstrained
 
             p[1:-1, 1:-1] += phi_int.reshape(Ny_i, Nx_i)
 
@@ -654,13 +634,9 @@ class BlowSuctionSolver:
             v_int_new = v_new[1:-1, 1:-1].ravel()
             div_new = (self._Du @ u_int_new) + (self._Dv @ v_int_new)
 
-            # Add the same bottom boundary source using CURRENT wall_v
+            # same bottom source with current wall_v
             wall_v = self.wall_profile(t)
-            b = np.zeros_like(div_new)
-            for i in range(Nx_i):
-                k = i  # j=0 row
-                b[k] += -(wall_v[i + 1]) / self.dy
-            div_new += b
+            div_new = div_new + (self._Bwall @ wall_v)
 
             div_inf = np.max(np.abs(div_new))
             wall_flux = np.trapezoid(v_new[0, :], self.x)
@@ -686,8 +662,3 @@ class BlowSuctionSolver:
             frames_u.append(u.copy())
             frames_v.append(v.copy())
             frames_p.append(p.copy())
-
-        frames_u = np.array(frames_u)
-        frames_v = np.array(frames_v)
-        frames_p = np.array(frames_p)
-        return frames_u, frames_v, frames_p, self.time
