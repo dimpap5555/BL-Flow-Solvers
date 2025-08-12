@@ -610,6 +610,20 @@ class BlowSuctionSolver:
             v_int = v_star[1:-1, 1:-1].ravel()
 
             div_flat = (self._Du @ u_int) + (self._Dv @ v_int)
+            # Add boundary divergence from prescribed bottom blowing v(0,x)=wall_v
+            Nx_i = self.Nx - 2
+            Ny_i = self.Ny - 2
+            wall_v = self.wall_profile(t)  # shape: (Nx,)
+
+            # Dy1's first row corresponds to (v_1 - v_wall)/dy. Since v_wall is not in v_int,
+            # we must add the source term -v_wall/dy to div at the first interior row (j=0).
+            b = np.zeros_like(div_flat)
+            # Map interior i=0..Nx_i-1 to physical x-index i+1
+            for i in range(Nx_i):
+                k = 0 * Nx_i + i  # (j=0, i)
+                b[k] += -(wall_v[i + 1]) / self.dy
+
+            div_flat += b
             rhs_flat = (self.rho / self.dt) * div_flat
 
             if getattr(self, "_pois_dirichlet", None) is not None:
@@ -639,6 +653,15 @@ class BlowSuctionSolver:
             u_int_new = u_new[1:-1, 1:-1].ravel()
             v_int_new = v_new[1:-1, 1:-1].ravel()
             div_new = (self._Du @ u_int_new) + (self._Dv @ v_int_new)
+
+            # Add the same bottom boundary source using CURRENT wall_v
+            wall_v = self.wall_profile(t)
+            b = np.zeros_like(div_new)
+            for i in range(Nx_i):
+                k = i  # j=0 row
+                b[k] += -(wall_v[i + 1]) / self.dy
+            div_new += b
+
             div_inf = np.max(np.abs(div_new))
             wall_flux = np.trapezoid(v_new[0, :], self.x)
             top_flux = np.trapezoid(v_new[-1, :], self.x)
