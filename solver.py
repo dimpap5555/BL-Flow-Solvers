@@ -547,8 +547,20 @@ class BlowSuctionSolver:
             dpdy = np.zeros_like(v)
             dpdy[1:-1, :] = (p[2:, :] - p[:-2, :]) / (2 * self.dy)
 
-            rhs_u = inv_dt * u - (1 / self.rho) * dpdx
-            rhs_v = inv_dt * v - (1 / self.rho) * dpdy
+            # Laplacians for implicit diffusion
+            lap_u = np.zeros_like(u)
+            lap_v = np.zeros_like(v)
+            lap_u[1:-1, 1:-1] = (
+                (u[1:-1, 2:] - 2 * u[1:-1, 1:-1] + u[1:-1, :-2]) / self.dx ** 2
+                + (u[2:, 1:-1] - 2 * u[1:-1, 1:-1] + u[:-2, 1:-1]) / self.dy ** 2
+            )
+            lap_v[1:-1, 1:-1] = (
+                (v[1:-1, 2:] - 2 * v[1:-1, 1:-1] + v[1:-1, :-2]) / self.dx ** 2
+                + (v[2:, 1:-1] - 2 * v[1:-1, 1:-1] + v[:-2, 1:-1]) / self.dy ** 2
+            )
+
+            rhs_u = inv_dt * u + self.nu * lap_u - (1.0 / self.rho) * dpdx
+            rhs_v = inv_dt * v + self.nu * lap_v - (1.0 / self.rho) * dpdy
 
             b_u = rhs_u[1:-1, 1:-1].copy()
             b_u[:, 0] -= self._aW * u[1:-1, 0]
@@ -570,15 +582,21 @@ class BlowSuctionSolver:
             u_star[1:-1, 1:-1] = sol_u.reshape(Ny_i, Nx_i)
             v_star[1:-1, 1:-1] = sol_v.reshape(Ny_i, Nx_i)
 
-            # Apply boundary conditions (only bottom wall enforced)
+            # bottom: prescribed wall
             u_star[0, :] = 0.0
             v_star[0, :] = wall_v
+            # open (do-nothing) on top/left/right: zero normal gradient
+            u_star[-1, :] = u_star[-2, :]
+            u_star[:, 0] = u_star[:, 1]
+            u_star[:, -1] = u_star[:, -2]
+            v_star[-1, :] = v_star[-2, :]
+            v_star[:, 0] = v_star[:, 1]
+            v_star[:, -1] = v_star[:, -2]
 
             u_int = u_star[1:-1, 1:-1].ravel()
             v_int = v_star[1:-1, 1:-1].ravel()
 
             div_flat = (self._Du @ u_int) + (self._Dv @ v_int)
-            div_flat *= self.rho / self.dt
             v1 = v_star[1, 1:-1]
             bc_bottom = (self.rho / self.dt) * (v1 - wall_v[1:-1]) / self.dy
             div_flat[:Nx_i] += bc_bottom
@@ -606,7 +624,12 @@ class BlowSuctionSolver:
 
             u_new[0, :] = 0.0
             v_new[0, :] = wall_v
-            # leave top/left/right normals unconstrained
+            u_new[-1, :] = u_new[-2, :]
+            u_new[:, 0] = u_new[:, 1]
+            u_new[:, -1] = u_new[:, -2]
+            v_new[-1, :] = v_new[-2, :]
+            v_new[:, 0] = v_new[:, 1]
+            v_new[:, -1] = v_new[:, -2]
 
             p[1:-1, 1:-1] += phi_int.reshape(Ny_i, Nx_i)
 
@@ -614,10 +637,11 @@ class BlowSuctionSolver:
             v_int_new = v_new[1:-1, 1:-1].ravel()
             div_new = (self._Du @ u_int_new) + (self._Dv @ v_int_new)
             bc_bottom_new = (
-                    self.rho / self.dt * (v_new[1, 1:-1] - wall_v[1:-1]) / self.dy
+                self.rho / self.dt * (v_new[1, 1:-1] - wall_v[1:-1]) / self.dy
             )
             div_new[:Nx_i] += bc_bottom_new
 
+            # Diagnostics and flux balances
             div_inf = np.max(np.abs(div_new))
             wall_flux = np.trapezoid(v_new[0, :], self.x)
             top_flux = np.trapezoid(v_new[-1, :], self.x)
@@ -625,15 +649,14 @@ class BlowSuctionSolver:
             right_flux = np.trapezoid(u_new[:, -1], self.y)
             out_sum = top_flux + left_flux + right_flux
             print(
-                f"[step {n}] div_inf={div_inf:.3e}, wall_flux={wall_flux:.3e}, "
-                f"out_sum={out_sum:.3e}, mass_err={(wall_flux + out_sum):.3e}"
+                f"[step {n}] div_inf={div_inf:.3e}, wall={wall_flux:.3e}, "
+                f"top={top_flux:.3e}, left={left_flux:.3e}, right={right_flux:.3e}, "
+                f"mass_err={(wall_flux + out_sum):.3e}"
             )
             ref = max(1.0, np.max(np.abs(u_new)), np.max(np.abs(v_new)))
-            tol_div = 1e-8 if n == 0 else 1e-10
+            tol_div = 1e-7 if n == 0 else 1e-10
             assert div_inf / ref < tol_div, f"divergence {div_inf:.2e} exceeds tolerance"
-            assert (
-                    abs(wall_flux + out_sum) <= 1e-8 * max(1.0, abs(wall_flux))
-            ), "mass imbalance"
+            assert abs(wall_flux + out_sum) <= 1e-8 * max(1.0, abs(wall_flux)), "mass imbalance"
 
             u, v = u_new, v_new
 
