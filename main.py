@@ -94,7 +94,7 @@ def blow_suction_example():
     Nt = 100
 
     def wall(t, x):
-        return 1.0 * np.ones_like(x)
+        return 0.1 * np.ones_like(x)
 
     solver = BlowSuctionSolver(rho, nu, x, y, dt, Nt, wall, cp=0.1, verbose=True)
     solver.stability_report()

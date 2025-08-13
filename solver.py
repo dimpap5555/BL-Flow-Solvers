@@ -381,35 +381,45 @@ class BlowSuctionSolver:
 
             A = self._Du @ self._Gx + self._Dv @ self._Gy
             A = A.tolil()
-            # Dirichlet on top, left, right
-            for i in range(Nx_i):
-                k = (Ny_i - 1) * Nx_i + i
-                A[k, :] = 0.0
-                A[k, k] = 1.0
-            for j in range(Ny_i):
-                k_left = j * Nx_i
-                k_right = j * Nx_i + (Nx_i - 1)
-                A[k_left, :] = 0.0
-                A[k_left, k_left] = 1.0
-                A[k_right, :] = 0.0
-                A[k_right, k_right] = 1.0
+
+            # Pure-Neumann Laplacian; add a single gauge pin to make it solvable
+            pin = 0  # (j=0,i=0) interior scalar index
+            A[pin, :] = 0.0
+            A[:, pin] = 0.0
+            A[pin, pin] = 1.0
+
             self._pois_A = A.tocsc()
             self._pois_lu = splu(self._pois_A)
+            self._pin = pin
+
+            # collect Dirichlet rows once
+            dir_rows = []
+            for i in range(Nx_i):  # top
+                dir_rows.append((Ny_i - 1) * Nx_i + i)
+            for j in range(Ny_i):  # left & right
+                dir_rows.append(j * Nx_i + 0)
+                dir_rows.append(j * Nx_i + (Nx_i - 1))
 
             # Bottom boundary source operator
             rows, cols, data = [], [], []
             for i in range(Nx_i):
-                k = i  # bottom row index j=0
+                k = i  # j = 0 (first interior scalar row)
                 rows.append(k)
-                cols.append(i + 1)
-                data.append(-1.0 / self.dy)
-            self._Bbottom = sparse.csr_matrix((data, (rows, cols)), shape=(Nx_i * Ny_i, self.Nx))
+                cols.append(i + 1)  # matches physical x-index of wall v
+                data.append(-1.0 / self.dy)  # <-- ensure NEGATIVE here
+            self._Bbottom = sparse.csr_matrix(
+                (data, (rows, cols)), shape=(Nx_i * Ny_i, self.Nx)
+            )
 
     def _assemble_poisson_rhs(self, u_star, v_star, wall_v):
         u_int = u_star[1:-1, 1:-1].ravel()
         v_int = v_star[1:-1, 1:-1].ravel()
         div_flat = (self._Du @ u_int) + (self._Dv @ v_int)
         div_flat = div_flat + (self._Bbottom @ wall_v)
+        bot_slice = slice(0, self._Nx_i)  # first interior scalar row
+        print("[dbg] first-row pieces:",
+                f"Dv_v={np.linalg.norm((self._Dv @ v_int)[bot_slice]):.3e}",
+                f"Bwall={np.linalg.norm((self._Bbottom @ wall_v)[bot_slice]):.3e}")
         return (self.rho / self.dt) * div_flat
 
     def stability_report(self):
@@ -553,14 +563,31 @@ class BlowSuctionSolver:
             v_star[:, 0] = v_star[:, 1]
             v_star[:, -1] = v_star[:, -2]
 
-            rhs_flat = self._assemble_poisson_rhs(u_star, v_star, wall_v)
+            rhs_flat = self._assemble_poisson_rhs(u_star, v_star, wall_v).astype(float)
+
+            # --- Nullspace (compatibility) fix on pure-Neumann system ---
+            pin = self._pin
+            # mean over all rows except the pin
+            mask = np.ones_like(rhs_flat, dtype=bool)
+            mask[pin] = False
+            mean_free = rhs_flat[mask].mean()
+            rhs_flat[mask] -= mean_free
+            rhs_flat[pin] = 0.0  # keep the gauge row at exactly zero
+
+            # optional: tiny second pass to kill any residual due to FP rounding
+            residual = rhs_flat[mask].sum()
+            rhs_flat[mask] -= residual / mask.sum()
+            rhs_flat[pin] = 0.0
+
+            if self.verbose:
+                print(f"[pois] rhs_inf={np.max(np.abs(rhs_flat)):.3e}, sum={rhs_flat.sum():.3e}")
+
             phi_int = self._pois_lu.solve(rhs_flat)
 
             res = self._pois_A @ phi_int - rhs_flat
             res_inf = float(np.max(np.abs(res)))
             rhs_inf = float(np.max(np.abs(rhs_flat))) if rhs_flat.size else 0.0
-            if self.verbose:
-                print(f"[pois] res_inf={res_inf:.3e}")
+
             assert res_inf <= 1e-8 * max(1.0, rhs_inf), "poisson residual too large"
 
             gradx_phi = (self._Gx @ phi_int).reshape(Ny_i, Nx_i)
@@ -583,7 +610,16 @@ class BlowSuctionSolver:
             p[1:-1, 1:-1] += phi_int.reshape(Ny_i, Nx_i)
 
             rhs_chk = self._assemble_poisson_rhs(u_new, v_new, wall_v)
-            max_div = np.max(np.abs(rhs_chk)) * self.dt / self.rho
+
+            # --- project diagnostics to the Neumann subspace (exclude the pin) ---
+            pin = self._pin
+            mask = np.ones_like(rhs_chk, dtype=bool)
+            mask[pin] = False
+            rhs_chk_proj = rhs_chk.copy()
+            rhs_chk_proj[pin] = 0.0
+            rhs_chk_proj[mask] -= rhs_chk_proj[mask].mean()
+
+            max_div = np.max(np.abs(rhs_chk_proj)) * self.dt / self.rho
             if self.verbose:
                 print(f"[chk] max_div={max_div:.3e}")
                 wall_flux = np.trapezoid(v_new[0, :], self.x)
