@@ -87,19 +87,43 @@ def main():
 def blow_suction_example():
     """Run a simple demonstration of the BlowSuctionSolver."""
     rho = 1.0
-    nu = 1e-3
-    x = np.linspace(0.0, 0.1, 50)
-    y = np.linspace(0.0, 0.05, 50)
-    dt = 1e-3
-    Nt = 50
+    nu = 1.81e-5
+    x = np.linspace(0.0, 0.1, 100)
+    y = np.linspace(0.0, 0.1, 100)
+    dt = 1e-2
+    Nt = 100
 
     def wall(t, x):
-        return 0.01 * np.sin(2 * np.pi * t) * np.ones_like(x)
+        return 5.0 * np.sin(4 * np.pi * x / 0.1 + 4 * np.pi * t) * np.ones_like(x)
 
     solver = BlowSuctionSolver(rho, nu, x, y, dt, Nt, wall, verbose=True)
-    frames_u, frames_v, time = solver.run()
+    frames_u, frames_v, time = solver.run_implicit()
     print(f"Max wall-normal velocity at final time: {frames_v[-1].max():.3e}")
 
+    X, Y = np.meshgrid(x, y)
+    levels_u = np.linspace(frames_u.min(), frames_u.max(), 50)
+    levels_v = np.linspace(frames_v.min(), frames_v.max(), 50)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
+    cu = ax1.contourf(X, Y, frames_u[0], levels=levels_u)
+    fig.colorbar(cu, ax=ax1).set_label('u [m/s]')
+    cv = ax2.contourf(X, Y, frames_v[0], levels=levels_v)
+    fig.colorbar(cv, ax=ax2).set_label('v [m/s]')
+
+    def animate(k):
+        ax1.clear();
+        ax2.clear()
+        ax1.contourf(X, Y, frames_u[k], levels=levels_u)
+        ax2.contourf(X, Y, frames_v[k], levels=levels_v)
+        ax1.set_xlabel('x [m]');
+        ax1.set_ylabel('y [m]')
+        ax2.set_xlabel('x [m]');
+        ax2.set_ylabel('y [m]')
+        ax1.set_title(f'u at t={time[k]:.3f}s')
+        ax2.set_title(f'v at t={time[k]:.3f}s')
+
+    ani = FuncAnimation(fig, animate, frames=len(time), interval=100)
+    plt.tight_layout()
+    plt.show()
 
 if __name__ == '__main__':
     blow_suction_example()

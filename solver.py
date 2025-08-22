@@ -264,7 +264,8 @@ class BlowSuctionSolver:
         self.Ny = len(self.y)
         self.time = np.arange(Nt) * dt
 
-        self._build_poisson_matrix()
+        # 🔷 Prebuild Neumann Poisson matrix for (Ny, Nx) layout (row-major flatten)
+        self.A = self._build_neumann_poisson_matrix(self.Ny, self.Nx, self.dx, self.dy)
 
     def wall_profile(self, t):
         return self.wall_func(t, self.x)
@@ -381,3 +382,137 @@ class BlowSuctionSolver:
         frames_u = np.array(frames_u)
         frames_v = np.array(frames_v)
         return frames_u, frames_v, self.time
+
+    def _laplacian(self, f):
+        lap = np.zeros_like(f)
+        lap[1:-1, 1:-1] = (
+            (f[1:-1, 2:] - 2.0*f[1:-1, 1:-1] + f[1:-1, :-2]) / self.dx**2 +
+            (f[2:, 1:-1] - 2.0*f[1:-1, 1:-1] + f[:-2, 1:-1]) / self.dy**2
+        )
+        return lap
+
+    def _implicit_diffusion(self, u, n_iter=100):
+        u_new = u.copy()
+        coef = 1.0 + 2.0*self.nu*self.dt*(1.0/self.dx**2 + 1.0/self.dy**2)
+        inv_coef = 1.0/coef
+        for _ in range(n_iter):
+            u_new[1:-1, 1:-1] = (
+                u[1:-1, 1:-1] +
+                self.nu*self.dt * (
+                    (u_new[1:-1, 2:] + u_new[1:-1, :-2]) / self.dx**2 +
+                    (u_new[2:, 1:-1] + u_new[:-2, 1:-1]) / self.dy**2
+                )
+            ) * inv_coef
+        return u_new
+
+    def _divergence(self, u, v):
+        div = np.zeros_like(u)
+        div[1:-1, 1:-1] = (
+            (u[1:-1, 2:] - u[1:-1, :-2])/(2*self.dx) +
+            (v[2:, 1:-1] - v[:-2, 1:-1])/(2*self.dy)
+        )
+        return div
+
+    def _correct_velocity(self, u_star, v_star, p):
+        u = u_star.copy()
+        v = v_star.copy()
+        u[1:-1, 1:-1] -= self.dt/self.rho * (p[1:-1, 2:] - p[1:-1, :-2])/(2*self.dx)
+        v[1:-1, 1:-1] -= self.dt/self.rho * (p[2:, 1:-1] - p[:-2, 1:-1])/(2*self.dy)
+        return u, v
+
+    def _apply_velocity_bcs(self, u, v, t):
+        """
+        Prototype BCs:
+          - y=0 (wall): u=0, v=Vw(t,x)
+          - x=0, x=Lx, y=Ly: Neumann (copy interior)
+        """
+        Vw = self.wall_profile(t)
+        # y=0 wall
+        u[0, :] = 0.0
+        v[0, :] = Vw
+        # y=Ly top (Neumann)
+        u[-1, :] = u[-2, :]
+        v[-1, :] = v[-2, :]
+        # x=0 left (Neumann)
+        u[:, 0] = u[:, 1]
+        v[:, 0] = v[:, 1]
+        # x=Lx right (Neumann)
+        u[:, -1] = u[:, -2]
+        v[:, -1] = v[:, -2]
+        return u, v
+
+    # -------------------- sparse Poisson (Neumann) --------------------
+    def _build_neumann_poisson_matrix(self, Ny, Nx, dx, dy):
+        """
+        5-point Laplacian for array shaped (Ny, Nx), flattened in C order.
+        Nearest-neighbor connectivity; Neumann BC handled by copying rows later.
+        We'll fix p[0,0]=0 for uniqueness in the solve.
+        """
+        N = Ny * Nx
+        dx2 = dx*dx
+        dy2 = dy*dy
+        main = np.full(N, -2.0/dx2 - 2.0/dy2)
+        off_x = np.full(N-1, 1.0/dx2)
+        off_y = np.full(N-Nx, 1.0/dy2)
+
+        # zero horizontal coupling across row breaks (between j rows)
+        for j in range(1, Ny):
+            off_x[j*Nx - 1] = 0.0
+
+        diags = [main, off_x, off_x, off_y, off_y]
+        offsets = [0, -1, 1, -Nx, Nx]
+        A = sparse.diags(diags, offsets, shape=(N, N)).tocsc()
+        return A
+
+    def _pressure_poisson_sparse(self, rhs, p_prev=None):
+        """
+        Neumann everywhere + reference node p[0,0]=0.
+        rhs shape (Ny, Nx) = (self.Ny, self.Nx)
+        """
+        # Flatten RHS
+        b = rhs.ravel().copy()
+
+        # Modify a copy of A to impose reference node
+        A = self.A.tolil(copy=True)
+        A[0, :] = 0.0
+        A[0, 0] = 1.0
+        b[0] = 0.0
+        A = A.tocsc()
+
+        p_flat = spsolve(A, b)
+        p = p_flat.reshape((self.Ny, self.Nx))
+        # (Optionally) shift to keep mean ~ 0 if desired; not required.
+        return p
+
+    def run_implicit(self, diffusion_iters=100):
+        u = np.zeros((self.Ny, self.Nx))
+        v = np.zeros_like(u)
+        p = np.zeros_like(u)
+
+        frames_u, frames_v = [], []
+
+        for n, t in enumerate(self.time):
+            if self.verbose and n % 10 == 0:
+                print(f"[blow-implicit] step {n}/{self.Nt}")
+
+            # 1) BCs
+            u, v = self._apply_velocity_bcs(u, v, t)
+
+            # 2) Implicit diffusion (Jacobi sweeps)
+            u_star = self._implicit_diffusion(u, n_iter=diffusion_iters)
+            v_star = self._implicit_diffusion(v, n_iter=diffusion_iters)
+            u_star, v_star = self._apply_velocity_bcs(u_star, v_star, t)
+
+            # 3) Pressure (sparse Neumann)
+            div_star = self._divergence(u_star, v_star)
+            rhs = (self.rho / self.dt) * div_star
+            p = self._pressure_poisson_sparse(rhs, p_prev=p)
+
+            # 4) Correction + BCs
+            u, v = self._correct_velocity(u_star, v_star, p)
+            u, v = self._apply_velocity_bcs(u, v, t)
+
+            frames_u.append(u.copy())
+            frames_v.append(v.copy())
+
+        return np.array(frames_u), np.array(frames_v), self.time

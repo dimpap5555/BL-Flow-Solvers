@@ -43,6 +43,6 @@ def test_blowsolver_zero_wall():
     Nt = 3
 
     solver = BlowSuctionSolver(rho, nu, x, y, dt, Nt, lambda t, x: np.zeros_like(x))
-    frames_u, frames_v, _ = solver.run()
+    frames_u, frames_v, _ = solver.run_explicit()
     assert np.allclose(frames_u, 0.0)
     assert np.allclose(frames_v, 0.0)
