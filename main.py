@@ -16,18 +16,18 @@ def main():
     mu = rho * nu
     L = 1.0
 
-    Nx, Ny = 500, 100
+    Nx, Ny = 100, 100
     x = np.linspace(0, L, Nx)
     y = np.linspace(0, 0.05, Ny)
 
     dt = 5e-3
-    Nt = 100
+    Nt = 201
 
     epsilon = 0.1
     omega = 2 * np.pi * 5
 
     def inlet(t, y):
-        return epsilon * U_inf * np.sin(omega * t)# * np.exp(-y / (0.1 * y[-1]))
+        return epsilon * U_inf * np.sin(omega * t) * np.exp(-y / (0.1 * y[-1])) # * np.sin(2 * np.pi * 2/0.05 * y + omega * t) * np.exp(-y / (0.1 * y[-1]))
 
     # ----------------------------------------------------------
 
@@ -37,6 +37,7 @@ def main():
 
     # Solve linearized equations
     solver = LinearBLSolver(base, rho, nu, dt, Nt, inlet, verbose=True)
+    #frames_u, frames_v, t_snap = solver.run_explicit()
     frames_u, frames_v, t_snap = solver.run_implicit(n_iter=20, tol=1e-6)
     drag = solver.compute_drag(frames_u, mu)
 
@@ -69,18 +70,36 @@ def main():
     ax3.set_ylabel('Drag [N/m]')
     ax3.legend()
 
-    def animate(k):
-        ax1.clear(); ax2.clear(); ax3.clear()
-        ax1.contourf(X, Y, frames_u[k], levels=levels_u)
-        ax2.contourf(X, Y, frames_v[k], levels=levels_v)
-        ax3.plot(t_snap[:k+1], drag[:k+1], 'k-')
-        ax3.axhline(drag_base, color='b', linestyle='--')
-        ax1.set_xlabel('x [m]'); ax1.set_ylabel('y [m]'); ax1.set_title(f'u at t={t_snap[k]:.3f}s')
-        ax2.set_xlabel('x [m]'); ax2.set_ylabel('y [m]'); ax2.set_title(f'v at t={t_snap[k]:.3f}s')
-        ax3.set_xlabel('Time [s]'); ax3.set_ylabel('Drag [N/m]')
-        ax3.legend(['Unsteady drag', 'Steady numerical drag'])
+    # def animate(k):
+    #     ax1.clear(); ax2.clear(); ax3.clear()
+    #     ax1.contourf(X, Y, frames_u[k], levels=levels_u)
+    #     ax2.contourf(X, Y, frames_v[k], levels=levels_v)
+    #     ax3.plot(t_snap[:k+1], drag[:k+1], 'k-')
+    #     ax3.axhline(drag_base, color='b', linestyle='--')
+    #     ax1.set_xlabel('x [m]'); ax1.set_ylabel('y [m]'); ax1.set_title(f'u at t={t_snap[k]:.3f}s')
+    #     ax2.set_xlabel('x [m]'); ax2.set_ylabel('y [m]'); ax2.set_title(f'v at t={t_snap[k]:.3f}s')
+    #     ax3.set_xlabel('Time [s]'); ax3.set_ylabel('Drag [N/m]')
+    #     ax3.legend(['Unsteady drag', 'Steady numerical drag'])
+    #
+    # ani = FuncAnimation(fig, animate, frames=len(t_snap), interval=100)
 
-    ani = FuncAnimation(fig, animate, frames=len(t_snap), interval=100)
+    ax1.clear();
+    ax2.clear();
+    ax3.clear()
+    ax1.contourf(X, Y, frames_u[-1], levels=levels_u)
+    ax2.contourf(X, Y, frames_v[-1], levels=levels_v)
+    ax3.plot(t_snap, drag, 'k-')
+    ax3.axhline(drag_base, color='b', linestyle='--')
+    ax1.set_xlabel('x [m]');
+    ax1.set_ylabel('y [m]');
+    ax1.set_title(f'u at t={t_snap[-1]:.3f}s')
+    ax2.set_xlabel('x [m]');
+    ax2.set_ylabel('y [m]');
+    ax2.set_title(f'v at t={t_snap[-1]:.3f}s')
+    ax3.set_xlabel('Time [s]');
+    ax3.set_ylabel('Drag [N/m]')
+    ax3.legend(['Unsteady drag', 'Steady numerical drag'])
+
     plt.tight_layout()
     plt.show()
 
@@ -88,15 +107,18 @@ def blow_suction_example():
     """Run a simple demonstration of the BlowSuctionSolver."""
     rho = 1.0
     nu = 1.81e-5
-    x = np.linspace(0.0, 0.1, 100)
-    y = np.linspace(0.0, 0.1, 100)
+    x = np.linspace(0.0, 0.1, 200)
+    y = np.linspace(0.0, 0.1, 200)
     dt = 1e-2
-    Nt = 100
+    Nt = 101
 
     def wall(t, x):
-        return 5.0 * np.sin(4 * np.pi * x / 0.1 + 4 * np.pi * t) * np.ones_like(x)
+        return 5.0 * np.sin(4 * np.pi * x / 0.1 ) * np.ones_like(x)
 
     solver = BlowSuctionSolver(rho, nu, x, y, dt, Nt, wall, verbose=True)
+    solver.stability_report()
+
+    # frames_u, frames_v, time = solver.run_explicit()
     frames_u, frames_v, time = solver.run_implicit()
     print(f"Max wall-normal velocity at final time: {frames_v[-1].max():.3e}")
 
@@ -109,19 +131,30 @@ def blow_suction_example():
     cv = ax2.contourf(X, Y, frames_v[0], levels=levels_v)
     fig.colorbar(cv, ax=ax2).set_label('v [m/s]')
 
-    def animate(k):
-        ax1.clear();
-        ax2.clear()
-        ax1.contourf(X, Y, frames_u[k], levels=levels_u)
-        ax2.contourf(X, Y, frames_v[k], levels=levels_v)
-        ax1.set_xlabel('x [m]');
-        ax1.set_ylabel('y [m]')
-        ax2.set_xlabel('x [m]');
-        ax2.set_ylabel('y [m]')
-        ax1.set_title(f'u at t={time[k]:.3f}s')
-        ax2.set_title(f'v at t={time[k]:.3f}s')
+    ax1.clear();
+    ax2.clear()
+    ax1.contourf(X, Y, frames_u[-1], levels=levels_u)
+    ax2.contourf(X, Y, frames_v[-1], levels=levels_v)
+    ax1.set_xlabel('x [m]');
+    ax1.set_ylabel('y [m]')
+    ax2.set_xlabel('x [m]');
+    ax2.set_ylabel('y [m]')
+    ax1.set_title(f'u at t={time[-1]:.3f}s')
+    ax2.set_title(f'v at t={time[-1]:.3f}s')
 
-    ani = FuncAnimation(fig, animate, frames=len(time), interval=100)
+    # def animate(k):
+    #     ax1.clear();
+    #     ax2.clear()
+    #     ax1.contourf(X, Y, frames_u[k], levels=levels_u)
+    #     ax2.contourf(X, Y, frames_v[k], levels=levels_v)
+    #     ax1.set_xlabel('x [m]');
+    #     ax1.set_ylabel('y [m]')
+    #     ax2.set_xlabel('x [m]');
+    #     ax2.set_ylabel('y [m]')
+    #     ax1.set_title(f'u at t={time[k]:.3f}s')
+    #     ax2.set_title(f'v at t={time[k]:.3f}s')
+    #
+    # ani = FuncAnimation(fig, animate, frames=len(time), interval=100)
     plt.tight_layout()
     plt.show()
 

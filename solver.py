@@ -257,6 +257,7 @@ class BlowSuctionSolver:
         self.Nt = Nt
         self.wall_func = wall_func
         self.verbose = verbose
+        self.cp = 0.2
 
         self.dx = self.x[1] - self.x[0]
         self.dy = self.y[1] - self.y[0]
@@ -267,20 +268,56 @@ class BlowSuctionSolver:
         # 🔷 Prebuild Neumann Poisson matrix for (Ny, Nx) layout (row-major flatten)
         self.A = self._build_neumann_poisson_matrix(self.Ny, self.Nx, self.dx, self.dy)
 
+    def stability_report(self):
+        """Return diffusion and pressure stability metrics."""
+        diff_limit = (self.dx ** 2 * self.dy ** 2) / (2 * self.nu * (self.dx ** 2 + self.dy ** 2))
+        diff_score = self.dt / diff_limit
+
+        press_limit = min(self.dx, self.dy) / self.cp
+        press_score = self.dt / press_limit
+
+        score = max(diff_score, press_score)
+        if score > 1:
+            tag = "UNSTABLE"
+        elif score >= 0.5:
+            tag = "marginal"
+        else:
+            tag = "stable"
+        if self.verbose:
+            print(f"Diff={diff_score:.3f}, Press={press_score:.3f}, Score={score:.3f} ({tag})")
+        return diff_score, press_score, score
+
     def wall_profile(self, t):
         return self.wall_func(t, self.x)
 
-    def _build_poisson_matrix(self):
-        """Build Laplacian matrix for the pressure Poisson equation."""
+    def _setup_linear_system(self):
+        """Pre-compute coefficient arrays and sparse matrix."""
+        inv_dt = 1.0 / self.dt
+        aP = (
+            inv_dt
+            + 2 * self.nu / self.dx ** 2
+            + 2 * self.nu / self.dy ** 2
+            + self.U0 / self.dx
+            + self.V0 / self.dy
+        )
+        aW = -self.nu / self.dx ** 2 - self.U0 / self.dx
+        aE = np.full_like(self.U0, -self.nu / self.dx ** 2)
+        aS = -self.nu / self.dy ** 2 - self.V0 / self.dy
+        aN = np.full_like(self.U0, -self.nu / self.dy ** 2)
+
+        # store only interior coefficients
+        self.aP = aP[1:-1, 1:-1]
+        self.aW = aW[1:-1, 1:-1]
+        self.aE = aE[1:-1, 1:-1]
+        self.aS = aS[1:-1, 1:-1]
+        self.aN = aN[1:-1, 1:-1]
+
         Nx_i = self.Nx - 2
         Ny_i = self.Ny - 2
-        dx2 = self.dx ** 2
-        dy2 = self.dy ** 2
-        aP = 2 / dx2 + 2 / dy2
-        aW = aE = -1 / dx2
-        aS = aN = -1 / dy2
 
-        rows, cols, data = [], [], []
+        rows = []
+        cols = []
+        data = []
 
         def idx(j, i):
             return j * Nx_i + i
@@ -288,94 +325,119 @@ class BlowSuctionSolver:
         for j in range(Ny_i):
             for i in range(Nx_i):
                 k = idx(j, i)
+                data.append(self.aP[j, i])
                 rows.append(k)
                 cols.append(k)
-                data.append(aP)
                 if i > 0:
                     rows.append(k)
                     cols.append(idx(j, i - 1))
-                    data.append(aW)
+                    data.append(self.aW[j, i])
                 if i < Nx_i - 1:
                     rows.append(k)
                     cols.append(idx(j, i + 1))
-                    data.append(aE)
+                    data.append(self.aE[j, i])
                 if j > 0:
                     rows.append(k)
                     cols.append(idx(j - 1, i))
-                    data.append(aS)
+                    data.append(self.aS[j, i])
                 if j < Ny_i - 1:
                     rows.append(k)
                     cols.append(idx(j + 1, i))
-                    data.append(aN)
+                    data.append(self.aN[j, i])
 
         N = Nx_i * Ny_i
-        self.P = sparse.csr_matrix((data, (rows, cols)), shape=(N, N))
+        self.A = sparse.csr_matrix((data, (rows, cols)), shape=(N, N))
 
-    def run(self):
-        """March the solution using an explicit projection method."""
+    def stability_report(self):
+        """Return diffusion and pressure stability metrics."""
+        diff_limit = (self.dx ** 2 * self.dy ** 2) / (2 * self.nu * (self.dx ** 2 + self.dy ** 2))
+        diff_score = self.dt / diff_limit
+
+        press_limit = min(self.dx, self.dy) / self.cp
+        press_score = self.dt / press_limit
+
+        score = max(diff_score, press_score)
+        if score > 1:
+            tag = "UNSTABLE"
+        elif score >= 0.5:
+            tag = "marginal"
+        else:
+            tag = "stable"
+        if self.verbose:
+            print(f"Diff={diff_score:.3f}, Press={press_score:.3f}, Score={score:.3f} ({tag})")
+        return diff_score, press_score, score
+
+    def run_explicit(self):
+        """Advance the solution using the explicit projection scheme."""
         u = np.zeros((self.Ny, self.Nx))
         v = np.zeros_like(u)
         p = np.zeros_like(u)
         frames_u = []
         frames_v = []
+        if self.verbose:
+            self.stability_report()
         for n, t in enumerate(self.time):
             if self.verbose and n % 10 == 0:
                 print(f"[blow] step {n}/{self.Nt}")
 
+            # Step 1: predictor
             v[0, :] = self.wall_profile(t)
             u_star = u.copy()
             v_star = v.copy()
 
-            lap_u = (
-                (u[:, 2:] - 2 * u[:, 1:-1] + u[:, :-2]) / self.dx ** 2
-                + (u[2:, :] - 2 * u[1:-1, :] + u[:-2, :]) / self.dy ** 2
+            lap_u = np.zeros_like(u)
+            lap_u[1:-1, 1:-1] = (
+                (u[1:-1, 2:] - 2 * u[1:-1, 1:-1] + u[1:-1, :-2]) / self.dx ** 2
+                + (u[2:, 1:-1] - 2 * u[1:-1, 1:-1] + u[:-2, 1:-1]) / self.dy ** 2
             )
-            lap_v = (
-                (v[:, 2:] - 2 * v[:, 1:-1] + v[:, :-2]) / self.dx ** 2
-                + (v[2:, :] - 2 * v[1:-1, :] + v[:-2, :]) / self.dy ** 2
+            lap_v = np.zeros_like(v)
+            lap_v[1:-1, 1:-1] = (
+                (v[1:-1, 2:] - 2 * v[1:-1, 1:-1] + v[1:-1, :-2]) / self.dx ** 2
+                + (v[2:, 1:-1] - 2 * v[1:-1, 1:-1] + v[:-2, 1:-1]) / self.dy ** 2
             )
-            u_star[1:-1, 1:-1] += self.dt * self.nu * lap_u[1:-1, 1:-1]
-            v_star[1:-1, 1:-1] += self.dt * self.nu * lap_v[1:-1, 1:-1]
 
+            dpdx = np.zeros_like(u)
+            dpdx[:, 1:-1] = (p[:, 2:] - p[:, :-2]) / (2 * self.dx)
+            dpdy = np.zeros_like(v)
+            dpdy[1:-1, :] = (p[2:, :] - p[:-2, :]) / (2 * self.dy)
+
+            u_star[1:-1, 1:-1] += self.dt * (self.nu * lap_u[1:-1, 1:-1] - (1 / self.rho) * dpdx[1:-1, 1:-1])
+            v_star[1:-1, 1:-1] += self.dt * (self.nu * lap_v[1:-1, 1:-1] - (1 / self.rho) * dpdy[1:-1, 1:-1])
+
+            # Apply boundary conditions (no-change except blow/suction wall)
             u_star[0, :] = 0.0
-            u_star[-1, :] = 0.0
-            u_star[:, 0] = 0.0
-            u_star[:, -1] = 0.0
+            u_star[-1, :] = u_star[-2, :]
+            u_star[:, 0] = u_star[:, 1]
+            u_star[:, -1] = u_star[:, -2]
             v_star[0, :] = self.wall_profile(t)
-            v_star[-1, :] = 0.0
-            v_star[:, 0] = 0.0
-            v_star[:, -1] = 0.0
+            v_star[-1, :] = v_star[-2, :]
+            v_star[:, 0] = v_star[:, 1]
+            v_star[:, -1] = v_star[:, -2]
 
+            # Step 2: divergence of tentative velocity
             div = (
                 (u_star[1:-1, 2:] - u_star[1:-1, :-2]) / (2 * self.dx)
                 + (v_star[2:, 1:-1] - v_star[:-2, 1:-1]) / (2 * self.dy)
             )
-            rhs = (self.rho / self.dt) * div
-            p_int = spsolve(self.P, rhs.ravel())
-            p[1:-1, 1:-1] = p_int.reshape(self.Ny - 2, self.Nx - 2)
-            p[0, :] = 0.0
-            p[-1, :] = 0.0
-            p[:, 0] = 0.0
-            p[:, -1] = 0.0
 
-            dpdx = (p[1:-1, 2:] - p[1:-1, :-2]) / (2 * self.dx)
-            dpdy = (p[2:, 1:-1] - p[:-2, 1:-1]) / (2 * self.dy)
-            u_new = u_star.copy()
-            v_new = v_star.copy()
-            u_new[1:-1, 1:-1] -= self.dt / self.rho * dpdx
-            v_new[1:-1, 1:-1] -= self.dt / self.rho * dpdy
+            # Step 3: explicit pressure correction
+            p[1:-1, 1:-1] -= self.rho * self.cp * self.dt * div
 
-            u_new[0, :] = 0.0
-            u_new[-1, :] = 0.0
-            u_new[:, 0] = 0.0
-            u_new[:, -1] = 0.0
-            v_new[0, :] = self.wall_profile(t)
-            v_new[-1, :] = 0.0
-            v_new[:, 0] = 0.0
-            v_new[:, -1] = 0.0
+            # Step 4: velocity projection
+            dpdx_new = (p[1:-1, 2:] - p[1:-1, :-2]) / (2 * self.dx)
+            dpdy_new = (p[2:, 1:-1] - p[:-2, 1:-1]) / (2 * self.dy)
+            u[1:-1, 1:-1] = u_star[1:-1, 1:-1] - (self.dt / self.rho) * dpdx_new
+            v[1:-1, 1:-1] = v_star[1:-1, 1:-1] - (self.dt / self.rho) * dpdy_new
 
-            u = u_new
-            v = v_new
+            u[0, :] = 0.0
+            u[-1, :] = u[-2, :]
+            u[:, 0] = u[:, 1]
+            u[:, -1] = u[:, -2]
+            v[0, :] = self.wall_profile(t)
+            v[-1, :] = v[-2, :]
+            v[:, 0] = v[:, 1]
+            v[:, -1] = v[:, -2]
+
             frames_u.append(u.copy())
             frames_v.append(v.copy())
 
