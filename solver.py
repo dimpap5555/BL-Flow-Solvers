@@ -290,83 +290,6 @@ class BlowSuctionSolver:
     def wall_profile(self, t):
         return self.wall_func(t, self.x)
 
-    def _setup_linear_system(self):
-        """Pre-compute coefficient arrays and sparse matrix."""
-        inv_dt = 1.0 / self.dt
-        aP = (
-            inv_dt
-            + 2 * self.nu / self.dx ** 2
-            + 2 * self.nu / self.dy ** 2
-            + self.U0 / self.dx
-            + self.V0 / self.dy
-        )
-        aW = -self.nu / self.dx ** 2 - self.U0 / self.dx
-        aE = np.full_like(self.U0, -self.nu / self.dx ** 2)
-        aS = -self.nu / self.dy ** 2 - self.V0 / self.dy
-        aN = np.full_like(self.U0, -self.nu / self.dy ** 2)
-
-        # store only interior coefficients
-        self.aP = aP[1:-1, 1:-1]
-        self.aW = aW[1:-1, 1:-1]
-        self.aE = aE[1:-1, 1:-1]
-        self.aS = aS[1:-1, 1:-1]
-        self.aN = aN[1:-1, 1:-1]
-
-        Nx_i = self.Nx - 2
-        Ny_i = self.Ny - 2
-
-        rows = []
-        cols = []
-        data = []
-
-        def idx(j, i):
-            return j * Nx_i + i
-
-        for j in range(Ny_i):
-            for i in range(Nx_i):
-                k = idx(j, i)
-                data.append(self.aP[j, i])
-                rows.append(k)
-                cols.append(k)
-                if i > 0:
-                    rows.append(k)
-                    cols.append(idx(j, i - 1))
-                    data.append(self.aW[j, i])
-                if i < Nx_i - 1:
-                    rows.append(k)
-                    cols.append(idx(j, i + 1))
-                    data.append(self.aE[j, i])
-                if j > 0:
-                    rows.append(k)
-                    cols.append(idx(j - 1, i))
-                    data.append(self.aS[j, i])
-                if j < Ny_i - 1:
-                    rows.append(k)
-                    cols.append(idx(j + 1, i))
-                    data.append(self.aN[j, i])
-
-        N = Nx_i * Ny_i
-        self.A = sparse.csr_matrix((data, (rows, cols)), shape=(N, N))
-
-    def stability_report(self):
-        """Return diffusion and pressure stability metrics."""
-        diff_limit = (self.dx ** 2 * self.dy ** 2) / (2 * self.nu * (self.dx ** 2 + self.dy ** 2))
-        diff_score = self.dt / diff_limit
-
-        press_limit = min(self.dx, self.dy) / self.cp
-        press_score = self.dt / press_limit
-
-        score = max(diff_score, press_score)
-        if score > 1:
-            tag = "UNSTABLE"
-        elif score >= 0.5:
-            tag = "marginal"
-        else:
-            tag = "stable"
-        if self.verbose:
-            print(f"Diff={diff_score:.3f}, Press={press_score:.3f}, Score={score:.3f} ({tag})")
-        return diff_score, press_score, score
-
     def run_explicit(self):
         """Advance the solution using the explicit projection scheme."""
         u = np.zeros((self.Ny, self.Nx))
@@ -374,89 +297,68 @@ class BlowSuctionSolver:
         p = np.zeros_like(u)
         frames_u = []
         frames_v = []
+
         if self.verbose:
             self.stability_report()
+
         for n, t in enumerate(self.time):
             if self.verbose and n % 10 == 0:
                 print(f"[blow] step {n}/{self.Nt}")
 
-            # Step 1: predictor
-            v[0, :] = self.wall_profile(t)
+            # Step 1: predictor (diffusion + pressure gradient)
             u_star = u.copy()
             v_star = v.copy()
+            u_star, v_star = self._apply_velocity_bcs(u_star, v_star, t)
 
-            lap_u = np.zeros_like(u)
-            lap_u[1:-1, 1:-1] = (
-                (u[1:-1, 2:] - 2 * u[1:-1, 1:-1] + u[1:-1, :-2]) / self.dx ** 2
-                + (u[2:, 1:-1] - 2 * u[1:-1, 1:-1] + u[:-2, 1:-1]) / self.dy ** 2
+            lap_u = self._laplacian(u)
+            lap_v = self._laplacian(v)
+            dpdx, dpdy = self._pressure_gradient(p)
+
+            u_star[1:-1, 1:-1] += self.dt * (
+                self.nu * lap_u[1:-1, 1:-1] - (1 / self.rho) * dpdx[1:-1, 1:-1]
             )
-            lap_v = np.zeros_like(v)
-            lap_v[1:-1, 1:-1] = (
-                (v[1:-1, 2:] - 2 * v[1:-1, 1:-1] + v[1:-1, :-2]) / self.dx ** 2
-                + (v[2:, 1:-1] - 2 * v[1:-1, 1:-1] + v[:-2, 1:-1]) / self.dy ** 2
+            v_star[1:-1, 1:-1] += self.dt * (
+                self.nu * lap_v[1:-1, 1:-1] - (1 / self.rho) * dpdy[1:-1, 1:-1]
             )
-
-            dpdx = np.zeros_like(u)
-            dpdx[:, 1:-1] = (p[:, 2:] - p[:, :-2]) / (2 * self.dx)
-            dpdy = np.zeros_like(v)
-            dpdy[1:-1, :] = (p[2:, :] - p[:-2, :]) / (2 * self.dy)
-
-            u_star[1:-1, 1:-1] += self.dt * (self.nu * lap_u[1:-1, 1:-1] - (1 / self.rho) * dpdx[1:-1, 1:-1])
-            v_star[1:-1, 1:-1] += self.dt * (self.nu * lap_v[1:-1, 1:-1] - (1 / self.rho) * dpdy[1:-1, 1:-1])
-
-            # Apply boundary conditions (no-change except blow/suction wall)
-            u_star[0, :] = 0.0
-            u_star[-1, :] = u_star[-2, :]
-            u_star[:, 0] = u_star[:, 1]
-            u_star[:, -1] = u_star[:, -2]
-            v_star[0, :] = self.wall_profile(t)
-            v_star[-1, :] = v_star[-2, :]
-            v_star[:, 0] = v_star[:, 1]
-            v_star[:, -1] = v_star[:, -2]
+            u_star, v_star = self._apply_velocity_bcs(u_star, v_star, t)
 
             # Step 2: divergence of tentative velocity
-            div = (
-                (u_star[1:-1, 2:] - u_star[1:-1, :-2]) / (2 * self.dx)
-                + (v_star[2:, 1:-1] - v_star[:-2, 1:-1]) / (2 * self.dy)
-            )
+            div = self._divergence(u_star, v_star)[1:-1, 1:-1]
 
             # Step 3: explicit pressure correction
             p[1:-1, 1:-1] -= self.rho * self.cp * self.dt * div
 
             # Step 4: velocity projection
-            dpdx_new = (p[1:-1, 2:] - p[1:-1, :-2]) / (2 * self.dx)
-            dpdy_new = (p[2:, 1:-1] - p[:-2, 1:-1]) / (2 * self.dy)
-            u[1:-1, 1:-1] = u_star[1:-1, 1:-1] - (self.dt / self.rho) * dpdx_new
-            v[1:-1, 1:-1] = v_star[1:-1, 1:-1] - (self.dt / self.rho) * dpdy_new
+            dpdx_new, dpdy_new = self._pressure_gradient(p)
+            u[1:-1, 1:-1] = u_star[1:-1, 1:-1] - (self.dt / self.rho) * dpdx_new[1:-1, 1:-1]
+            v[1:-1, 1:-1] = v_star[1:-1, 1:-1] - (self.dt / self.rho) * dpdy_new[1:-1, 1:-1]
 
-            u[0, :] = 0.0
-            u[-1, :] = u[-2, :]
-            u[:, 0] = u[:, 1]
-            u[:, -1] = u[:, -2]
-            v[0, :] = self.wall_profile(t)
-            v[-1, :] = v[-2, :]
-            v[:, 0] = v[:, 1]
-            v[:, -1] = v[:, -2]
+            u, v = self._apply_velocity_bcs(u, v, t)
 
             frames_u.append(u.copy())
             frames_v.append(v.copy())
 
-        frames_u = np.array(frames_u)
-        frames_v = np.array(frames_v)
-        return frames_u, frames_v, self.time
+        return np.array(frames_u), np.array(frames_v), self.time
 
     def _laplacian(self, f):
         lap = np.zeros_like(f)
         lap[1:-1, 1:-1] = (
-            (f[1:-1, 2:] - 2.0*f[1:-1, 1:-1] + f[1:-1, :-2]) / self.dx**2 +
-            (f[2:, 1:-1] - 2.0*f[1:-1, 1:-1] + f[:-2, 1:-1]) / self.dy**2
+            (f[1:-1, 2:] - 2.0 * f[1:-1, 1:-1] + f[1:-1, :-2]) / self.dx ** 2
+            + (f[2:, 1:-1] - 2.0 * f[1:-1, 1:-1] + f[:-2, 1:-1]) / self.dy ** 2
         )
         return lap
 
+    def _pressure_gradient(self, p):
+        dpdx = np.zeros_like(p)
+        dpdy = np.zeros_like(p)
+        dpdx[:, 1:-1] = (p[:, 2:] - p[:, :-2]) / (2 * self.dx)
+        dpdy[1:-1, :] = (p[2:, :] - p[:-2, :]) / (2 * self.dy)
+        return dpdx, dpdy
+
     def _implicit_diffusion(self, u, n_iter=100):
         u_new = u.copy()
-        coef = 1.0 + 2.0*self.nu*self.dt*(1.0/self.dx**2 + 1.0/self.dy**2)
-        inv_coef = 1.0/coef
+        coef = 1.0 + 2.0 * self.nu * self.dt * (1.0 / self.dx ** 2 + 1.0 / self.dy ** 2)
+        inv_coef = 1.0 / coef
         for _ in range(n_iter):
             u_new[1:-1, 1:-1] = (
                 u[1:-1, 1:-1] +
