@@ -661,6 +661,20 @@ class LinearizedJointSolver:
         # wall_func expects (t, x) -> normal velocity at wall
         return self.wall_func(t, self.x)
 
+    def _zero_mean(self, Vw):
+        Lx = max(self.x[-1] - self.x[0], 1e-12)
+        return Vw - np.trapezoid(Vw, self.x) / Lx
+
+    def _taper_x0(self, arr, n_cells=3, power=2):
+        """Multiply by a smooth ramp at the inlet: 0→1 over n_cells."""
+        if n_cells <= 0:
+            return arr
+        ramp = np.ones_like(arr)
+        n = min(n_cells, self.Nx)
+        s = (np.arange(n) / max(n - 1, 1)) ** power
+        ramp[:n] = s
+        return arr * ramp
+
     def run(self, diffusion_tol=1e-10):
         """
         Fully-implicit linear step + projection at each time.
@@ -792,6 +806,8 @@ class LinearizedJointSolver:
 
         # precompute boundary arrays for this step (Dirichlet/Neumann)
         Vw = self.wall_profile(t)
+        Vw = self._zero_mean(Vw)
+        Vw = self._taper_x0(Vw, n_cells=3, power=2)
 
         Lx = self.x[-1] - self.x[0] if self.x[-1] > self.x[0] else 1.0
         Qw = np.trapezoid(Vw, self.x)
@@ -850,6 +866,10 @@ class LinearizedJointSolver:
             v_new[-1, :] = v_new[-2, :]
             v_new[:, 0] = v_new[:, 1]
             v_new[:, -1] = v_new[:, -2]
+
+            omega = 0.7
+            u_k = (1 - omega) * u_k + omega * u_new
+            v_k = (1 - omega) * v_k + omega * v_new
 
             # update iteration state
             u_k, v_k = u_new, v_new
@@ -951,6 +971,3 @@ class LinearizedJointSolver:
         b[0] = 0.0
         p_flat = self._lu_p.solve(b)
         return p_flat.reshape((self.Ny, self.Nx))
-
-
-

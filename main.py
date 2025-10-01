@@ -31,12 +31,12 @@ def _boundary_layer_snapshot(
     ax_v = fig.add_subplot(gs[0, 1])
     ax_drag = fig.add_subplot(gs[1, :])
 
-    fig.suptitle(
-        "Boundary Layer Solver - {} scheme (snapshot)".format(
-            "Explicit" if explicit else "Implicit"
-        ),
-        fontsize=14,
-    )
+    # fig.suptitle(
+    #     "Boundary Layer Solver - {} scheme (snapshot)".format(
+    #         "Explicit" if explicit else "Implicit"
+    #     ),
+    #     fontsize=14,
+    # )
 
     contour_u = ax_u.contourf(X, Y, frames_u[-1], levels=levels_u, cmap=CMAP)
     contour_v = ax_v.contourf(X, Y, frames_v[-1], levels=levels_v, cmap=CMAP)
@@ -344,18 +344,18 @@ def run_joint_fully_implicit():
 
     # ----------------------- PARAMETERS -----------------------
     params = {
-        "U_inf": 2.0,
+        "U_inf": 2.5,
         "nu": 1.5e-5,
         "rho": 1.225,
         "L": 1.0,
         "Nx": 100,
         "Ny": 100,
-        "ymax": 0.5,        # domain height (m)
+        "ymax": 0.05,        # domain height (m)
         "dt": 1.0e-3,
-        "Nt": 200,
-        "wall_amp": 0.5,     # wall-normal velocity amplitude [m/s]
-        "wall_freq": 8.0,    # Hz
-        "gs_sweeps": 5,      # inner block-GS coupling iterations per step
+        "Nt": 1001,
+        "wall_amp": 0.05,     # wall-normal velocity amplitude [m/s]
+        "wall_freq": 10.0,    # Hz
+        "gs_sweeps": 4,      # inner block-GS coupling iterations per step
     }
 
     U_inf = params["U_inf"]
@@ -384,7 +384,7 @@ def run_joint_fully_implicit():
     # ----------------------------------------------------------
 
     # Build Blasius base flow
-    base = BlasiusFlow(U_inf, nu, x, y, eta_max=20.0, Neta=20000)
+    base = BlasiusFlow(U_inf, nu, x, y, eta_max=10.0, Neta=1000)
     drag_base = base.wall_shear_drag(mu, x)  # steady reference drag (N/m)
 
     # Joint fully-implicit solver (perturbations about base)
@@ -411,7 +411,7 @@ def run_joint_fully_implicit():
     X, Y = np.meshgrid(x, y)
     levels_u = np.linspace(frames_u.min(), frames_u.max(), 50)
     # avoid colorbar dominated by inlet edge; skip first few columns for v scaling if desired
-    v_slice = frames_v[:, :, 5:]
+    v_slice = frames_v[:, :, 10:]
     levels_v = np.linspace(v_slice.min(), v_slice.max(), 50)
 
     fig = plt.figure(figsize=(12, 8))
